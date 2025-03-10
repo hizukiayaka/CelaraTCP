@@ -35,7 +35,7 @@ public:
   virtual asio::mutable_buffer
   getMutableBuf() = 0;
 
-  virtual std::vector<char> getData() = 0;
+  virtual std::vector<unsigned char> getData() = 0;
 
   const uint_fast16_t getUsedBytes()
   {
@@ -85,8 +85,8 @@ public:
     return true;
   }
 
-  std::vector<char> getData() override {
-    return std::vector<char>(data_.begin(), data_.end());
+  std::vector<unsigned char> getData() override {
+    return std::vector<unsigned char>(data_.begin(), data_.end());
   };
 
   std::array<unsigned char, totalSize> getStorageBuffer() {
