@@ -36,6 +36,7 @@ public:
   getMutableBuf() = 0;
 
   virtual std::vector<unsigned char> getData() = 0;
+  virtual constexpr std::size_t getMaximumSize() = 0;
 
   const uint_fast16_t getUsedBytes()
   {
@@ -72,6 +73,11 @@ public:
   getMutableBuf() override
   {
     return mbuf_;
+  }
+
+  virtual constexpr std::size_t getMaximumSize() override
+  {
+    return totalSize;
   }
 
   virtual bool setUsedBytes(uint_fast16_t bytes) override {
