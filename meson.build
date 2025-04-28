@@ -17,4 +17,5 @@ subdir('contrib')
 
 celaratcp_com_inc = include_directories('common/inc')
 
+subdir('netdev')
 subdir('netio')
