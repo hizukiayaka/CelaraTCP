@@ -3,4 +3,9 @@
  * SPDX-FileCopyrightText: Hsia-Jun(Randy) Li
  */
 
-#include <tun_gnu_linux_impl.hpp>
+#include <optional>
+
+#include <linux/if_tun.h>
+#include <netlink/route/route.h>
+
+#include "tun_gnu_linux_impl.hpp"
