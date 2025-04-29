@@ -37,14 +37,15 @@ public:
     /* client peer */
     TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name, const asio::ip::address_v4 &addr);
 
-    template<typename NetworkPacket>
-    void async_read(NetworkPacket &buf, asio::yield_context yield);
-    template<typename NetworkPacket>
+    template<typename MutableBufferSequence>
+    void async_read(MutableBufferSequence& bufs, asio::yield_context yield);
+    template<typename ConstBufferSequence>
+    void async_write(ConstBufferSequence& bufs, asio::yield_context yield);
+
+    void async_read(NetPacket &buf, asio::yield_context yield);
     void async_read(std::forward_list<std::shared_ptr<NetPacket>> packets,asio::yield_context yield);
 
-    template<typename NetworkPacket>
-    void async_write(NetworkPacket &buf, asio::yield_context yield);
-    template<typename NetworkPacket>
+    void async_write(NetPacket &buf, asio::yield_context yield);
     void async_write(std::forward_list<std::shared_ptr<NetPacket>> packets, asio::yield_context yield);
 
     std::optional<TunGnuLinuxImpl> addNode(asio::ip::address_v4 &addr);

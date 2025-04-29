@@ -103,15 +103,25 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::io_context &io_context,
   rtnl_addr_put(rt_addr);
 }
 
-template <typename NetworkPacket>
+template<typename MutableBufferSequence>
+void TunGnuLinuxImpl::async_read(MutableBufferSequence& bufs, asio::yield_context yield)
+{
+  asio::async_read(stream_, bufs, std::move(yield));
+}
+
+template<typename ConstBufferSequence>
+void TunGnuLinuxImpl::async_write(ConstBufferSequence& bufs, asio::yield_context yield)
+{
+  asio::async_write(stream_, bufs, std::move(yield));
+}
+
 void
-TunGnuLinuxImpl::async_read(NetworkPacket &buf, asio::yield_context yield)
+TunGnuLinuxImpl::async_read(NetPacket &buf, asio::yield_context yield)
 {
   auto mbuf = buf.getMutableBuf();
   asio::async_read(stream_, mbuf, yield);
 }
 
-template <typename NetworkPacket>
 void
 TunGnuLinuxImpl::async_read(
     std::forward_list<std::shared_ptr<NetPacket> > packets,
@@ -126,15 +136,13 @@ TunGnuLinuxImpl::async_read(
   asio::async_read(stream_, mbufs, yield);
 }
 
-template <typename NetworkPacket>
 void
-TunGnuLinuxImpl::async_write(NetworkPacket &buf, asio::yield_context yield)
+TunGnuLinuxImpl::async_write(NetPacket &buf, asio::yield_context yield)
 {
   auto cbuf = buf.getConstBuf();
   asio::async_write(stream_, cbuf, yield);
 }
 
-template <typename NetworkPacket>
 void
 TunGnuLinuxImpl::async_write(
     std::forward_list<std::shared_ptr<NetPacket> > packets,
