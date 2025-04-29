@@ -12,13 +12,14 @@ namespace netdev {
 class VirtualNetDev::TunGnuLinuxImpl
 {
 private:
-  bool isMasterNode_;
-  bool isClient_;
   asio::posix::stream_descriptor stream_;
 
   struct nl_sock *sk_;
+  struct rtnl_link *link_;
   int ifindex_;
 
+  bool isMasterNode_;
+  bool isClient_;
 private:
   TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name);
   /* it would create a new queue */
@@ -46,6 +47,15 @@ public:
 
   bool up();
   bool down();
+
+  std::list<NetDevFiltertype> getSupportFilterType() const
+  {
+    return std::list<NetDevFiltertype>{};
+  }
+  bool setNetDevFilterType(std::list<NetDevFiltertype> type)
+  {
+    return false;
+  }
 };
 
 }

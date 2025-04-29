@@ -45,7 +45,8 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(const TunGnuLinuxImpl &other)
 
 VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(asio::io_context &io_context,
                                                 const std::string &intl_name)
-    : stream_(io_context) // Initialize stream_ with an executor
+    : stream_(io_context), link_(nullptr), ifindex_(-1), isMasterNode_(false),
+      isClient_(false)
 {
   struct ifreq ifr;
 
@@ -78,6 +79,13 @@ VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(asio::io_context &io_context,
       nl_socket_free(sk_);
       close(fd);
       throw std::runtime_error("failed to connect to netlink");
+  }
+
+  err = rtnl_link_get_kernel(sk_, ifindex_, nullptr, &link_);
+  if (err) {
+      nl_socket_free(sk_);
+      close(fd);
+      throw std::runtime_error("failed to get link");
   }
 
   isMasterNode_ = true;
@@ -170,34 +178,36 @@ VirtualNetDev::TunGnuLinuxImpl::async_write(
 bool
 VirtualNetDev::TunGnuLinuxImpl::up()
 {
-#if 0
-  struct ifreq ifr;
-  memset(&ifr, 0, sizeof(ifr));
-  strncpy(ifr.ifr_name, stream_.native_handle(), IFNAMSIZ);
-  if (ioctl(stream_.native_handle(), SIOCGIFFLAGS, &ifr) < 0)
-    return false;
+  auto flags = rtnl_link_get_flags(link_);
+  if (flags & IFF_UP) {
+      return true; // Already up
+  }
+  // Set the interface up
+  rtnl_link_set_flags(link_, IFF_UP);
 
-  ifr.ifr_flags |= IFF_UP;
-  if (ioctl(stream_.native_handle(), SIOCSIFFLAGS, &ifr) < 0)
-    return false;
-#endif
+  // Apply the changes using libnl
+  int err = rtnl_link_change(sk_, link_, link_, 0);
+  if (err) {
+      return false;
+  }
+
   return true;
 }
 
 bool
 VirtualNetDev::TunGnuLinuxImpl::down()
 {
-#if 0
-  struct ifreq ifr;
-  memset(&ifr, 0, sizeof(ifr));
-  strncpy(ifr.ifr_name, stream_.native_handle(), IFNAMSIZ);
-  if (ioctl(stream_.native_handle(), SIOCGIFFLAGS, &ifr) < 0)
-    return false;
+  auto flags = rtnl_link_get_flags(link_);
+  if (!(flags & IFF_UP)) {
+      return true; // Already down
+  }
+  rtnl_link_unset_flags(link_, IFF_UP);
 
-  ifr.ifr_flags &= ~IFF_UP;
-  if (ioctl(stream_.native_handle(), SIOCSIFFLAGS, &ifr) < 0)
-    return false;
-#endif
+  // Apply the changes using libnl
+  int err = rtnl_link_change(sk_, link_, link_, 0);
+  if (err) {
+      return false;
+  }
 
   return true;
 }

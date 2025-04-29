@@ -74,6 +74,17 @@ VirtualNetDev::down()
   pImpl_->down();
   return true;
 }
+std::list<NetDevFiltertype>
+VirtualNetDev::getSupportFilterType() const
+{
+  return pImpl_->getSupportFilterType();
+}
+
+bool
+VirtualNetDev::setNetDevFilterType(std::list<NetDevFiltertype> type)
+{
+  return pImpl_->setNetDevFilterType(type);
+}
 
 } // namespace netdev
 

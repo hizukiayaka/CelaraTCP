@@ -7,6 +7,7 @@
 #define _VIRTUAL_NETDEV_HPP_
 
 #include <experimental/propagate_const>
+#include <list>
 #include <forward_list>
 #include <memory>
 
@@ -17,6 +18,14 @@
 
 namespace celaratcp {
 namespace netdev {
+
+enum class NetDevFiltertype
+{
+  DROP_IPV6,
+  DROP_IPV4,
+  DROP_DEST_IP,
+  DROP_DEST_IP_PORT,
+};
 
 class VirtualNetDev
 {
@@ -37,12 +46,15 @@ public:
   void async_write(ConstBufferSequence &bufs, asio::yield_context yield);
 
   void async_read(NetPacket &buf, asio::yield_context yield);
+  void async_write(NetPacket &buf, asio::yield_context yield);
+
   void async_read(std::forward_list<std::shared_ptr<NetPacket> > packets,
                   asio::yield_context yield);
-
-  void async_write(NetPacket &buf, asio::yield_context yield);
   void async_write(std::forward_list<std::shared_ptr<NetPacket> > packets,
                    asio::yield_context yield);
+
+  std::list<NetDevFiltertype> getSupportFilterType() const;
+  bool setNetDevFilterType(std::list<NetDevFiltertype> types);
 
   bool up();
   bool down();
