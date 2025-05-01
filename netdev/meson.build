@@ -1,6 +1,15 @@
-netdev_inc = [include_directories('inc')]
+#project('netdev', 'cpp',
+#  version: '0.0.1',
+#  license: 'AGPL-3.0-or-later',
+#  meson_version: '>=1.2.0',
+#  default_options: [
+#    'cpp_std=c++20',
+#    'warning_level=2',
+#    'c_std=c11',
+#  ]
+#)
 
-libnl_dep = dependency('libnl-route-3.0')
+netdev_inc = [include_directories('inc')]
 
 netdev_sources = ['src/virtual_netdev.cpp']
 
@@ -23,7 +32,6 @@ endif
 netdev = library('netdev',
     netdev_sources,
     include_directories: [netdev_inc, celaratcp_com_inc],
-    cpp_pch: 'pch/virtual_netdev_pch.hpp',
     dependencies: [libnl_dep, libbpf_dep],
     sources: netdev_ebpf_skeletons  # Ensure skeletons are generated first
 )
