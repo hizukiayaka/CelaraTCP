@@ -29,29 +29,37 @@ protected:
   ~NetPacket() = default;
 
 public:
-  virtual asio::const_buffer
-  getConstBuf() = 0;
+  virtual asio::const_buffer getConstBuf() = 0;
 
-  virtual asio::mutable_buffer
-  getMutableBuf() = 0;
+  virtual asio::mutable_buffer getMutableBuf() = 0;
 
   virtual std::vector<unsigned char> getData() = 0;
   virtual constexpr std::size_t getMaximumSize() = 0;
 
-  const uint_fast16_t getUsedBytes()
+  const uint_fast16_t
+  getUsedBytes()
   {
     return usedBytes;
   }
 
-  virtual bool setUsedBytes(uint_fast16_t bytes)
+  virtual bool
+  setUsedBytes(uint_fast16_t bytes)
   {
     usedBytes = bytes;
     return true;
   }
 };
 
-template <std::size_t... Ns>
-class NetPacketSW : public NetPacket
+// Concept for containers holding items derived from NetPacket
+template <typename T> concept NetPacketContainer = requires
+{
+  typename std::remove_reference_t<T>::value_type;
+  requires std::is_base_of_v<
+      NetPacket, typename std::pointer_traits<typename std::remove_reference_t<
+                     T>::value_type>::element_type>;
+};
+
+template <std::size_t... Ns> class NetPacketSW : public NetPacket
 {
 private:
   static constexpr std::size_t totalSize = (Ns + ...);
@@ -59,6 +67,7 @@ private:
 
   asio::const_buffer cbuf_;
   asio::mutable_buffer mbuf_;
+
 public:
   explicit NetPacketSW()
       : cbuf_(asio::buffer(data_)), mbuf_(asio::buffer(data_)) {};
@@ -75,12 +84,15 @@ public:
     return mbuf_;
   }
 
-  virtual constexpr std::size_t getMaximumSize() override
+  virtual constexpr std::size_t
+  getMaximumSize() override
   {
     return totalSize;
   }
 
-  virtual bool setUsedBytes(uint_fast16_t bytes) override {
+  virtual bool
+  setUsedBytes(uint_fast16_t bytes) override
+  {
     if (bytes > data_.max_size())
       return false;
 
@@ -91,14 +103,17 @@ public:
     return true;
   }
 
-  std::vector<unsigned char> getData() override {
+  std::vector<unsigned char>
+  getData() override
+  {
     return std::vector<unsigned char>(data_.begin(), data_.end());
   };
 
-  std::array<unsigned char, totalSize> getStorageBuffer() {
+  std::array<unsigned char, totalSize>
+  getStorageBuffer()
+  {
     return data_;
   };
-
 };
 
 using Ipv4TcpHdrPacket = NetPacketSW<ipv4HdrSize, tcpHdrMinimalSize>;
