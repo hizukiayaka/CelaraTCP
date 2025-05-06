@@ -115,64 +115,20 @@ VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(
   rtnl_addr_put(rt_addr);
 }
 
-template <typename MutableBufferSequence>
-void
-VirtualNetDev::TunGnuLinuxImpl::async_read(MutableBufferSequence &bufs,
-                                           asio::yield_context yield)
-{
-  asio::async_read(stream_, bufs, std::move(yield));
-}
-
-template <typename ConstBufferSequence>
-void
-VirtualNetDev::TunGnuLinuxImpl::async_write(ConstBufferSequence &bufs,
-                                            asio::yield_context yield)
-{
-  asio::async_write(stream_, bufs, std::move(yield));
-}
-
 void
 VirtualNetDev::TunGnuLinuxImpl::async_read(NetPacket &buf,
-                                           asio::yield_context yield)
+                                           callback_t &&callback)
 {
   auto mbuf = buf.getMutableBuf();
-  asio::async_read(stream_, mbuf, yield);
-}
-
-void
-VirtualNetDev::TunGnuLinuxImpl::async_read(
-    std::forward_list<std::shared_ptr<NetPacket> > packets,
-    asio::yield_context yield)
-{
-  std::forward_list<asio::mutable_buffer> mbufs;
-  auto it = mbufs.before_begin();
-  for (auto &packet : packets) {
-      auto mbuf = packet->getMutableBuf();
-      it = mbufs.insert_after(it, mbuf);
-    }
-  asio::async_read(stream_, mbufs, yield);
+  asio::async_read(stream_, mbuf, std::move(callback));
 }
 
 void
 VirtualNetDev::TunGnuLinuxImpl::async_write(NetPacket &buf,
-                                            asio::yield_context yield)
+                                            callback_t &&callback)
 {
   auto cbuf = buf.getConstBuf();
-  asio::async_write(stream_, cbuf, yield);
-}
-
-void
-VirtualNetDev::TunGnuLinuxImpl::async_write(
-    std::forward_list<std::shared_ptr<NetPacket> > packets,
-    asio::yield_context yield)
-{
-  std::forward_list<asio::const_buffer> cbufs;
-  auto it = cbufs.before_begin();
-  for (auto &packet : packets) {
-      auto cbuf = packet->getConstBuf();
-      it = cbufs.insert_after(it, cbuf);
-    }
-  asio::async_write(stream_, cbufs, yield);
+  asio::async_write(stream_, cbuf, std::move(callback));
 }
 
 bool

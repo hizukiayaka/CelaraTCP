@@ -20,6 +20,7 @@ private:
 
   bool isMasterNode_;
   bool isClient_;
+
 private:
   TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name);
   /* it would create a new queue */
@@ -31,28 +32,61 @@ public:
                   const asio::ip::address_v4 &addr);
 
   template <typename MutableBufferSequence>
-  void async_read(MutableBufferSequence &bufs, asio::yield_context yield);
+  void
+  async_read(MutableBufferSequence &bufs, callback_t &&callback)
+  {
+    asio::async_read(stream_, bufs, std::move(callback));
+  }
+
   template <typename ConstBufferSequence>
-  void async_write(ConstBufferSequence &bufs, asio::yield_context yield);
+  void
+  async_write(ConstBufferSequence &bufs, callback_t &&callback)
+  {
+    asio::async_write(stream_, bufs, std::move(callback));
+  }
 
-  void async_read(NetPacket &buf, asio::yield_context yield);
-  void async_read(std::forward_list<std::shared_ptr<NetPacket> > packets,
-                  asio::yield_context yield);
+  void async_read(NetPacket &buf, callback_t &&callback);
+  void async_write(NetPacket &buf, callback_t &&callback);
 
-  void async_write(NetPacket &buf, asio::yield_context yield);
-  void async_write(std::forward_list<std::shared_ptr<NetPacket> > packets,
-                   asio::yield_context yield);
+  template <NetPacketContainer PacketSequence>
+  void
+  async_read(PacketSequence &packets, callback_t &&callback)
+  {
+    std::forward_list<asio::mutable_buffer> mbufs;
+    auto it = mbufs.before_begin();
+    for (auto &packet : packets) {
+        auto mbuf = packet->getMutableBuf();
+        it = mbufs.insert_after(it, mbuf);
+      }
+    asio::async_read(stream_, mbufs, std::move(callback));
+  }
+
+  template <NetPacketContainer PacketSequence>
+  void
+  async_write(PacketSequence &packets, callback_t &&callback)
+  {
+    std::forward_list<asio::const_buffer> cbufs;
+    auto it = cbufs.before_begin();
+    for (auto &packet : packets) {
+        auto cbuf = packet->getConstBuf();
+        it = cbufs.insert_after(it, cbuf);
+      }
+    asio::async_write(stream_, cbufs, std::move(callback));
+  }
 
   // std::optional<TunGnuLinuxImpl> addNode(asio::ip::address_v4 &addr);
 
   bool up();
   bool down();
 
-  std::list<NetDevFiltertype> getSupportFilterType() const
+  std::list<NetDevFiltertype>
+  getSupportFilterType() const
   {
     return std::list<NetDevFiltertype>{};
   }
-  bool setNetDevFilterType(std::list<NetDevFiltertype> type)
+
+  bool
+  setNetDevFilterType(std::list<NetDevFiltertype> type)
   {
     return false;
   }

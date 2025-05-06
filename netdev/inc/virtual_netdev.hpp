@@ -6,10 +6,12 @@
 #ifndef _VIRTUAL_NETDEV_HPP_
 #define _VIRTUAL_NETDEV_HPP_
 
+#include <concepts>
 #include <experimental/propagate_const>
-#include <list>
 #include <forward_list>
+#include <list>
 #include <memory>
+#include <type_traits>
 
 #include <asio.hpp>
 #include <asio/spawn.hpp>
@@ -27,8 +29,26 @@ enum class NetDevFiltertype
   DROP_DEST_IP_PORT,
 };
 
+// Define concepts for buffer containers
+template <typename T> concept MutableBufferContainer = requires(T t)
+{
+  typename std::remove_reference_t<T>::value_type;
+  requires std::is_convertible_v<
+      typename std::remove_reference_t<T>::value_type, asio::mutable_buffer>;
+};
+
+template <typename T> concept ConstBufferContainer = requires(T t)
+{
+  typename std::remove_reference_t<T>::value_type;
+  requires std::is_convertible_v<
+      typename std::remove_reference_t<T>::value_type, asio::const_buffer>;
+};
+
 class VirtualNetDev
 {
+public:
+  using callback_t = std::function<void(std::error_code, std::size_t)>;
+
 private:
 #ifdef __gnu_linux__
   class TunGnuLinuxImpl;
@@ -40,18 +60,20 @@ public:
                 const asio::ip::address_v4 &addr);
   ~VirtualNetDev();
 
-  template <typename MutableBufferSequence>
-  void async_read(MutableBufferSequence &bufs, asio::yield_context yield);
-  template <typename ConstBufferSequence>
-  void async_write(ConstBufferSequence &bufs, asio::yield_context yield);
+  template <MutableBufferContainer BufferSequence>
+  void async_read(BufferSequence &buffers, callback_t &&callback);
+  template <ConstBufferContainer BufferSequence>
+  void async_write(BufferSequence &buffers, callback_t &&callback);
 
-  void async_read(NetPacket &buf, asio::yield_context yield);
-  void async_write(NetPacket &buf, asio::yield_context yield);
+  void async_read(NetPacket &buf, callback_t &&callback);
+  void async_write(NetPacket &buf, callback_t &&callback);
 
-  void async_read(std::forward_list<std::shared_ptr<NetPacket> > packets,
-                  asio::yield_context yield);
-  void async_write(std::forward_list<std::shared_ptr<NetPacket> > packets,
-                   asio::yield_context yield);
+  template<NetPacketContainer PacketSequence>
+  void async_read(PacketSequence &packets,
+                  callback_t &&callback);
+  template<NetPacketContainer PacketSequence>
+  void async_write(PacketSequence &packets,
+                   callback_t &&callback);
 
   std::list<NetDevFiltertype> getSupportFilterType() const;
   bool setNetDevFilterType(std::list<NetDevFiltertype> types);
