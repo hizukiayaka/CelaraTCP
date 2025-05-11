@@ -58,12 +58,12 @@ main(int argc, char *argv[])
 
     std::forward_list<asio::mutable_buffer> packets = {hdr->getMutableBuf(), payload->getMutableBuf()};
 
-    auto readCallback = std::bind(readHandler, readHandler, hdr, payload, std::placeholders::_1, std::placeholders::_2);
+    auto readCallback = std::bind(readHandler, std::ref(readHandler), hdr, payload, std::placeholders::_1, std::placeholders::_2);
     tun.async_read(packets, readCallback);
     std::cout << "Received " << bytes_transferred << " bytes\n";
   };
 
-  auto readCallback = std::bind(readHandler, readHandler, hdr, payload, std::placeholders::_1, std::placeholders::_2);
+  auto readCallback = std::bind(readHandler, std::ref(readHandler), hdr, payload, std::placeholders::_1, std::placeholders::_2);
 
   auto testCallback = [&](std::error_code ec, std::size_t bytes_transferred) {
     if (ec) {
