@@ -25,6 +25,9 @@ private:
   TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name);
   /* it would create a new queue */
   // TunGnuLinuxImpl (const TunGnuLinuxImpl &other);
+  bool attachXdpProgram(const std::string &xdp_program_path);
+  bool attachSteeringEbpf(const std::string &ebpf_program_path);
+  bool attachFilterEbpf(const std::string &ebpf_program_path);
 public:
   ~TunGnuLinuxImpl();
   /* client peer */

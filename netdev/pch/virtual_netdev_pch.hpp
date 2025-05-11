@@ -22,5 +22,7 @@
 #include <netlink/route/addr.h>
 #include <netlink/route/link.h>
 
+#include <bpf/bpf.h>
+
 #include "tun_gnu_linux_impl.hpp"
 #endif

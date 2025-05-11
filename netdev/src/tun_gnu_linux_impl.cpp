@@ -115,6 +115,68 @@ VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(
   rtnl_addr_put(rt_addr);
 }
 
+bool
+celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachXdpProgram(
+    const std::string &xdp_program_path)
+{
+  int prog_fd = bpf_obj_get(xdp_program_path.c_str());
+  if (prog_fd < 0) {
+      perror("Failed to load XDP program");
+      return false;
+  }
+
+  if (bpf_prog_attach(prog_fd, ifindex_, BPF_XDP, 0) < 0) {
+      perror("Failed to attach XDP program");
+      close(prog_fd);
+      return false;
+  }
+
+  return true;
+}
+
+bool
+celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachSteeringEbpf(
+    const std::string &ebpf_program_path)
+{
+  // Load the eBPF program
+  int prog_fd = bpf_obj_get(ebpf_program_path.c_str());
+  if (prog_fd < 0) {
+      perror("Failed to load eBPF program");
+      return false;
+  }
+
+  // Attach the eBPF program to the TUN device using TUNSETSTEERINGEBPF
+  if (ioctl(stream_.native_handle(), TUNSETSTEERINGEBPF, prog_fd) < 0) {
+      perror("Failed to attach eBPF program with TUNSETSTEERINGEBPF");
+      close(prog_fd);
+      return false;
+  }
+
+  close(prog_fd);
+  return true;
+}
+
+bool
+celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachFilterEbpf(
+    const std::string &ebpf_program_path)
+{
+  // Load the eBPF program
+  int prog_fd = bpf_obj_get(ebpf_program_path.c_str());
+  if (prog_fd < 0) {
+      perror("Failed to load eBPF program");
+      return false;
+  }
+
+  if (ioctl(stream_.native_handle(), TUNSETFILTEREBPF, prog_fd) < 0) {
+      perror("Failed to attach eBPF program with TUNSETFILTEREBPF");
+      close(prog_fd);
+      return false;
+  }
+
+  close(prog_fd);
+  return true;
+}
+
 void
 VirtualNetDev::TunGnuLinuxImpl::async_read(NetPacket &buf,
                                            callback_t &&callback)
