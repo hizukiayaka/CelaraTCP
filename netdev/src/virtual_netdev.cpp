@@ -121,6 +121,26 @@ VirtualNetDev::setNetDevFilterType(std::list<NetDevFiltertype> type)
   return pImpl_->setNetDevFilterType(type);
 }
 
-} // namespace netdev
+bool VirtualNetDev::addWatchPort(uint16_t port)
+{
+  return pImpl_->addWatchPort(port);
+}
 
+bool VirtualNetDev::removeWatchPort(uint16_t port)
+{
+  return pImpl_->removeWatchPort(port);
+}
+
+bool VirtualNetDev::addPeerNode(const asio::ip::address &addr, uint16_t src_port, uint16_t dst_port)
+{
+  return pImpl_->addPeerNode(addr, src_port, dst_port);
+}
+
+bool VirtualNetDev::removePeerNode(const asio::ip::address &addr,
+                                     uint16_t src_port, uint16_t dst_port)
+{
+  return pImpl_->removePeerNode(addr, src_port, dst_port);
+}
+
+} // namespace netdev
 } // namespace celaratcp

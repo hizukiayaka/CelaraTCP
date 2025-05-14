@@ -93,6 +93,24 @@ public:
   {
     return false;
   }
+
+  bool addWatchPort(uint16_t port) {
+    return false;
+  }
+
+  bool removeWatchPort(uint16_t port) {
+    return false;
+  }
+  bool addPeerNode(const asio::ip::address &addr, uint16_t src_port,
+                   uint16_t dst_port)
+  {
+    return false;
+  }
+  bool removePeerNode(const asio::ip::address &addr, uint16_t src_port,
+                      uint16_t dst_port)
+  {
+    return false;
+  }
 };
 
 }
