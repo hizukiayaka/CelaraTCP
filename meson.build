@@ -18,3 +18,4 @@ subdir('common')
 
 subdir('netdev')
 subdir('netio')
+subdir('utils')
