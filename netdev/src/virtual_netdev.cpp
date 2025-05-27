@@ -109,47 +109,14 @@ VirtualNetDev::down()
   pImpl_->down();
   return true;
 }
-std::list<NetDevFiltertype>
-VirtualNetDev::getSupportFilterType() const
-{
-  return pImpl_->getSupportFilterType();
-}
 
-bool
-VirtualNetDev::setNetDevFilterType(std::list<NetDevFiltertype> type)
+VirtualNetDev::operator IPacketFilter *()
 {
-  return pImpl_->setNetDevFilterType(type);
-}
-
-bool VirtualNetDev::addWatchIpv4Port(uint16_t port)
-{
-  return pImpl_->addWatchIpv4Port(port);
-}
-
-bool VirtualNetDev::addWatchIpv6Port(uint16_t port)
-{
-  return pImpl_->addWatchIpv6Port(port);
-}
-
-bool VirtualNetDev::removeWatchIpv4Port(uint16_t port)
-{
-  return pImpl_->removeWatchIpv4Port(port);
-}
-
-bool VirtualNetDev::removeWatchIpv6Port(uint16_t port)
-{
-  return pImpl_->removeWatchIpv6Port(port);
-}
-
-bool VirtualNetDev::addPeerNode(const asio::ip::address &addr, uint16_t src_port, uint16_t dst_port)
-{
-  return pImpl_->addPeerNode(addr, src_port, dst_port);
-}
-
-bool VirtualNetDev::removePeerNode(const asio::ip::address &addr,
-                                     uint16_t src_port, uint16_t dst_port)
-{
-  return pImpl_->removePeerNode(addr, src_port, dst_port);
+#ifdef __gnu_linux__
+    return static_cast<IPacketFilter *>(pImpl_.get());
+#else
+    return nullptr;
+#endif
 }
 
 } // namespace netdev

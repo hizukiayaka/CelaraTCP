@@ -9,7 +9,7 @@
 namespace celaratcp {
 namespace netdev {
 
-class VirtualNetDev::TunGnuLinuxImpl
+class VirtualNetDev::TunGnuLinuxImpl : public IPacketFilter
 {
 private:
   asio::posix::stream_descriptor stream_;
@@ -20,21 +20,27 @@ private:
 
   struct bpf_object *filter_obj_;
   struct bpf_object *steering_obj_;
+
   struct bpf_program *filter_prog_;
   struct bpf_program *steering_prog_;
+
   int filter_map_fd_;
 
   int services_v4_mapfd_;
   int services_v6_mapfd_;
 
-  struct PeerEntry {
+  struct PeerEntry
+  {
     asio::ip::address src_addr;
     std::uint16_t src_port;
-};
-  struct PortMapFdPair {
+  };
+
+  struct PortMapFdPair
+  {
     std::uint16_t port;
     int map_fd;
-    std::list<PeerEntry> peers;
+    // Use slot-based container for peer management
+    std::vector<std::optional<PeerEntry>> peers;
   };
 
   std::list<PortMapFdPair> services_mapfd_v4_list_;
@@ -42,6 +48,7 @@ private:
 
   bool isMasterNode_;
   bool isClient_;
+
 private:
   TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name);
   /* it would create a new queue */
@@ -49,6 +56,7 @@ private:
   bool attachXdpProgram(const std::string &xdp_program_path);
   bool attachSteeringEbpf(const std::string &ebpf_program_path);
   bool attachFilterEbpf(const std::string &ebpf_program_path);
+
 public:
   ~TunGnuLinuxImpl();
   /* client peer */
@@ -103,31 +111,18 @@ public:
   bool up();
   bool down();
 
-  std::list<NetDevFiltertype>
-  getSupportFilterType() const
-  {
-    return std::list<NetDevFiltertype>{};
-  }
+  // IPacketFilter interface
+  std::list<NetDevFiltertype> getSupportFilterType() const override;
+  bool setNetDevFilterType(std::list<NetDevFiltertype> type) override;
+  bool addWatchIpv4Port(uint16_t port) override;
+  bool addWatchIpv6Port(uint16_t port) override;
+  bool removeWatchIpv4Port(uint16_t port) override;
+  bool removeWatchIpv6Port(uint16_t port) override;
 
-  bool
-  setNetDevFilterType(std::list<NetDevFiltertype> type);
-
-  bool addWatchIpv4Port(uint16_t port);
-  bool addWatchIpv6Port(uint16_t port);
-
-  bool removeWatchIpv4Port(uint16_t port) {
-    return false;
-  }
-  bool removeWatchIpv6Port(uint16_t port) {
-    return false;
-  }
   bool addPeerNode(const asio::ip::address &addr, uint16_t src_port,
-                   uint16_t dst_port);
+                   uint16_t dst_port) override;
   bool removePeerNode(const asio::ip::address &addr, uint16_t src_port,
-                      uint16_t dst_port)
-  {
-    return false;
-  }
+                      uint16_t dst_port) override;
 };
 
 }

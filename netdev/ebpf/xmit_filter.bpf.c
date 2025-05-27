@@ -33,6 +33,7 @@ struct
   __type(key, __u32);
   __type(value, struct peer_value_v4);
 } peers_v4_inner_map SEC(".maps");
+
 struct
 {
   __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -41,6 +42,7 @@ struct
   __type(key, __u32);
   __type(value, struct peer_value_v6);
 } peers_v6_inner_map SEC(".maps");
+
 struct
 {
   __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);

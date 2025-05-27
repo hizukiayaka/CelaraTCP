@@ -17,17 +17,10 @@
 #include <asio/spawn.hpp>
 
 #include "net_packet.hpp"
+#include "net_filter_inf.hpp"
 
 namespace celaratcp {
 namespace netdev {
-
-enum class NetDevFiltertype
-{
-  DROP_IPV6,
-  DROP_IPV4,
-  DROP_DEST_IP,
-  DROP_DEST_IP_PORT,
-};
 
 // Define concepts for buffer containers
 template <typename T> concept MutableBufferContainer = requires(T t)
@@ -78,18 +71,7 @@ public:
   bool up();
   bool down();
 
-  std::list<NetDevFiltertype> getSupportFilterType() const;
-  bool setNetDevFilterType(std::list<NetDevFiltertype> types);
-
-  bool addWatchIpv4Port(uint16_t port);
-  bool removeWatchIpv4Port(uint16_t port);
-  bool addWatchIpv6Port(uint16_t port);
-  bool removeWatchIpv6Port(uint16_t port);
-
-  bool addPeerNode(const asio::ip::address &addr, uint16_t src_port,
-                   uint16_t dst_port);
-  bool removePeerNode(const asio::ip::address &addr, uint16_t src_port,
-                      uint16_t dst_port);
+  operator IPacketFilter *();
 };
 
 } // namespace netdev
