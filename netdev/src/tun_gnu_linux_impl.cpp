@@ -237,7 +237,7 @@ bool VirtualNetDev::TunGnuLinuxImpl::addWatchIpv6Port(uint16_t port)
   }
 
   std::string map_name = "port_ipv6_" + std::to_string(port);
-  int inner_map_fd = bpf_create_map(BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32), sizeof(struct peer_value_v6), PER_SERVICE_MAX_CONNECTION, 0);
+  int inner_map_fd = bpf_map_create(BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32), sizeof(struct peer_value_v6), PER_SERVICE_MAX_CONNECTION, 0);
   if (inner_map_fd < 0) {
       return false;
   }
@@ -280,7 +280,10 @@ bool VirtualNetDev::TunGnuLinuxImpl::addPeerNode(const asio::ip::address &addr, 
       if (found == peers.end()) {
         uint32_t idx = peers.size();
         peers.push_back(peer);
-        struct peer_value_v4 val = {peer.src_ip, peer.src_port};
+        auto bytes = peer.src_addr.to_v4().to_bytes();
+        uint32_t ip;
+        std::memcpy(&ip, bytes.data(), 4);
+        struct peer_value_v4 val = {ip, peer.src_port};
         bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
       }
   } else if (addr.is_v6()) {
@@ -304,7 +307,7 @@ bool VirtualNetDev::TunGnuLinuxImpl::addPeerNode(const asio::ip::address &addr, 
       PeerEntry peer{addr, src_port};
 
       auto &peers = it->peers;
-      auto found = std::find_if(peers.begin(), peers.end(), [&](const PeerEntryV6 &p) {
+      auto found = std::find_if(peers.begin(), peers.end(), [&](const PeerEntry &p) {
         return p.src_addr == peer.src_addr && p.src_port == peer.src_port;
       });
 
@@ -312,7 +315,8 @@ bool VirtualNetDev::TunGnuLinuxImpl::addPeerNode(const asio::ip::address &addr, 
         uint32_t idx = peers.size();
         peers.push_back(peer);
         struct peer_value_v6 val = {};
-        std::copy(peer.src_ip.begin(), peer.src_ip.end(), val.src_ip);
+        auto bytes6 = peer.src_addr.to_v6().to_bytes();
+        std::copy(bytes6.begin(), bytes6.end(), val.src_ip);
         val.src_port = peer.src_port;
         bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
       }
