@@ -7,7 +7,7 @@
 
 #include <array>
 #include <cstdint>
-#include <vector>
+#include <span>
 
 #include <asio/buffer.hpp>
 
@@ -23,7 +23,7 @@ constexpr uint_fast16_t Udp6Payload = regularMtu - ipv6HdrSize - 8;
 class NetPacket
 {
 protected:
-  uint_fast16_t usedBytes {0};
+  uint_fast16_t usedBytes{ 0 };
 
   NetPacket() = default;
   ~NetPacket() = default;
@@ -33,11 +33,11 @@ public:
 
   virtual asio::mutable_buffer getMutableBuf() = 0;
 
-  virtual std::vector<unsigned char> getData() = 0;
+  virtual std::span<unsigned char> getData() = 0;
   virtual constexpr std::size_t getMaximumSize() = 0;
 
-  const uint_fast16_t
-  getUsedBytes()
+  uint_fast16_t
+  getUsedBytes() const
   {
     return usedBytes;
   }
@@ -103,10 +103,10 @@ public:
     return true;
   }
 
-  std::vector<unsigned char>
+  std::span<unsigned char>
   getData() override
   {
-    return std::vector<unsigned char>(data_.begin(), data_.end());
+    return std::span<unsigned char>(data_.begin(), data_.end());
   };
 
   std::array<unsigned char, totalSize>
