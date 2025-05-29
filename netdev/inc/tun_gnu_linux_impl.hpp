@@ -13,6 +13,8 @@ class VirtualNetDev::TunGnuLinuxImpl : public IPacketFilter
 {
 private:
   asio::posix::stream_descriptor stream_;
+  asio::strand<asio::any_io_executor> strand_read_;
+  asio::strand<asio::any_io_executor> strand_write_;
 
   struct nl_sock *sk_;
   struct rtnl_link *link_;
@@ -40,7 +42,7 @@ private:
     std::uint16_t port;
     int map_fd;
     // Use slot-based container for peer management
-    std::vector<std::optional<PeerEntry>> peers;
+    std::vector<std::optional<PeerEntry> > peers;
   };
 
   std::list<PortMapFdPair> services_mapfd_v4_list_;
@@ -50,7 +52,7 @@ private:
   bool isClient_;
 
 private:
-  TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name);
+  TunGnuLinuxImpl(asio::any_io_executor &ex, const std::string &intl_name);
   /* it would create a new queue */
   // TunGnuLinuxImpl (const TunGnuLinuxImpl &other);
   bool attachXdpProgram(const std::string &xdp_program_path);
@@ -60,7 +62,7 @@ private:
 public:
   ~TunGnuLinuxImpl();
   /* client peer */
-  TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name,
+  TunGnuLinuxImpl(asio::any_io_executor &ex, const std::string &intl_name,
                   const asio::ip::address_v4 &addr);
 
   template <typename MutableBufferSequence>
@@ -87,9 +89,9 @@ public:
     std::forward_list<asio::mutable_buffer> mbufs;
     auto it = mbufs.before_begin();
     for (auto &packet : packets) {
-        auto mbuf = packet->getMutableBuf();
-        it = mbufs.insert_after(it, mbuf);
-      }
+      auto mbuf = packet->getMutableBuf();
+      it = mbufs.insert_after(it, mbuf);
+    }
     asio::async_read(stream_, mbufs, std::move(callback));
   }
 
@@ -100,10 +102,28 @@ public:
     std::forward_list<asio::const_buffer> cbufs;
     auto it = cbufs.before_begin();
     for (auto &packet : packets) {
-        auto cbuf = packet->getConstBuf();
-        it = cbufs.insert_after(it, cbuf);
-      }
+      auto cbuf = packet->getConstBuf();
+      it = cbufs.insert_after(it, cbuf);
+    }
     asio::async_write(stream_, cbufs, std::move(callback));
+  }
+
+  template <typename MutableBufferSequence>
+  asio::awaitable<std::size_t>
+  async_read(MutableBufferSequence &&bufs)
+  {
+    co_return co_await asio::async_read(
+        stream_, std::forward<MutableBufferSequence>(bufs),
+        asio::bind_executor(strand_read_, asio::use_awaitable));
+  }
+
+  template <typename ConstBufferSequence>
+  asio::awaitable<std::size_t>
+  async_write(ConstBufferSequence &&bufs)
+  {
+    co_return co_await asio::async_write(
+        stream_, std::forward<ConstBufferSequence>(bufs),
+        asio::bind_executor(strand_write_, asio::use_awaitable));
   }
 
   // std::optional<TunGnuLinuxImpl> addNode(asio::ip::address_v4 &addr);

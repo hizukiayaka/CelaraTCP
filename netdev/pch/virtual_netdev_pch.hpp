@@ -8,7 +8,7 @@
 #include <optional>
 
 #include <asio.hpp>
-#include <asio/spawn.hpp>
+#include <asio/experimental/channel.hpp>
 #include "net_packet.hpp"
 
 #include "virtual_netdev.hpp"

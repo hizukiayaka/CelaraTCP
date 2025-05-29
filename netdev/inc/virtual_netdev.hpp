@@ -14,10 +14,9 @@
 #include <type_traits>
 
 #include <asio.hpp>
-#include <asio/spawn.hpp>
 
-#include "net_packet.hpp"
 #include "net_filter_inf.hpp"
+#include "net_packet.hpp"
 
 namespace celaratcp {
 namespace netdev {
@@ -49,7 +48,7 @@ private:
 #endif
 
 public:
-  VirtualNetDev(asio::io_context &io_context, const std::string &intl_name,
+  VirtualNetDev(asio::any_io_executor &ex, const std::string &intl_name,
                 const asio::ip::address_v4 &addr);
   ~VirtualNetDev();
 
@@ -61,12 +60,15 @@ public:
   void async_read(NetPacket &buf, callback_t &&callback);
   void async_write(NetPacket &buf, callback_t &&callback);
 
-  template<NetPacketContainer PacketSequence>
-  void async_read(PacketSequence &packets,
-                  callback_t &&callback);
-  template<NetPacketContainer PacketSequence>
-  void async_write(PacketSequence &packets,
-                   callback_t &&callback);
+  template <NetPacketContainer PacketSequence>
+  void async_read(PacketSequence &packets, callback_t &&callback);
+  template <NetPacketContainer PacketSequence>
+  void async_write(PacketSequence &packets, callback_t &&callback);
+
+  template <MutableBufferContainer BufferSequence>
+  asio::awaitable<std::size_t> async_read(BufferSequence &buffers);
+  template <ConstBufferContainer BufferSequence>
+  asio::awaitable<std::size_t> async_write(BufferSequence &buffers);
 
   bool up();
   bool down();
