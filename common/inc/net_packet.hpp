@@ -25,10 +25,16 @@ class NetPacket
 protected:
   uint_fast16_t usedBytes{ 0 };
 
+public:
+  class MetaData
+  {
+  public:
+    std::array<uint32_t, 4> data{ 0 };
+  } meta;
+
   NetPacket() = default;
   ~NetPacket() = default;
 
-public:
   virtual asio::const_buffer getConstBuf() = 0;
 
   virtual asio::mutable_buffer getMutableBuf() = 0;
