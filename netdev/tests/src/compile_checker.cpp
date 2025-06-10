@@ -15,6 +15,7 @@
 
 using namespace celaratcp;
 
+#if 0
 class manger{
 public:
   SyncUserspaceTcpStack<asio::ip::address_v4> &tcpStack_;
@@ -30,7 +31,6 @@ public:
 
 int main1(int argc, char *argv[])
 {
-#if 0
   asio::io_context ioc;
 
   asio::ip::network_v4 net1(asio::ip::make_address_v4("169.254.3.1"), 32);
@@ -80,9 +80,9 @@ int main1(int argc, char *argv[])
 
   tun.async_read(packets, testCallback);
   tun.async_read(mbufs, testCallback);
-#endif
   return 0;
 }
+#endif
 
 asio::awaitable<void> run2()
 {
@@ -123,7 +123,6 @@ int main2(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
-  main1(argc, argv);
   main2(argc, argv);
 
   return 0;
