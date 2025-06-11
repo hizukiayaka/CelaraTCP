@@ -127,4 +127,63 @@ using Ipv6TcpHdrPacket = NetPacketSW<ipv6HdrSize, tcpHdrMinimalSize>;
 using Ipv4UdpHdrPacket = NetPacketSW<ipv4HdrSize, udpHdrSize>;
 using Ipv6UdpHdrPacket = NetPacketSW<ipv6HdrSize, udpHdrSize>;
 
+class NetMemChunk : public NetPacket
+{
+private:
+  std::span<uint8_t> chunk_;
+  asio::const_buffer cbuf_;
+  asio::mutable_buffer mbuf_;
+  std::unique_ptr<uint8_t> meta_buf_;
+
+public:
+  template<typename It>
+  NetMemChunk(It first, std::size_t count, std::unique_ptr<uint8_t> meta = std::nullptr)
+      : chunk_(first, count), cbuf_(chunk_), mbuf_(chunk_), meta_buf_(std::move(meta))
+  {
+  }
+
+  template<typename It, typename End>
+  NetMemChunk(It first, End last, std::unique_ptr<uint8_t> meta = std::nullptr)
+      : chunk_(first, last), cbuf_(chunk_), mbuf_(chunk_), meta_buf_(std::move(meta))
+  {
+  }
+
+  virtual asio::const_buffer
+  getConstBuf() override
+  {
+    return cbuf_;
+  }
+
+  virtual asio::mutable_buffer
+  getMutableBuf() override
+  {
+    return mbuf_;
+  }
+
+  virtual constexpr std::size_t
+  getMaximumSize() override
+  {
+    return chunk_.size();
+  }
+
+  virtual bool
+  setUsedBytes(uint_fast16_t bytes) override
+  {
+    if (bytes > chunk_.size())
+      return false;
+
+    usedBytes = bytes;
+    cbuf_ = asio::buffer(chunk_, bytes);
+    mbuf_ = asio::buffer(chunk_, bytes);
+
+    return true;
+  }
+
+  std::span<unsigned char>
+  getData() override
+  {
+    return chunk_;
+  };
+};
+
 }
