@@ -33,7 +33,7 @@ public:
   } meta;
 
   NetPacket() = default;
-  ~NetPacket() = default;
+  virtual ~NetPacket() = default;
 
   virtual asio::const_buffer getConstBuf() = 0;
 
@@ -147,6 +147,8 @@ public:
   {
   }
 
+  virtual ~NetMemChunk() = default;
+
   virtual asio::const_buffer
   getConstBuf() override
   {
@@ -180,6 +182,12 @@ public:
   getData() override
   {
     return chunk_;
+  };
+
+  virtual std::size_t
+  GetId()
+  {
+    return 0;
   };
 };
 
