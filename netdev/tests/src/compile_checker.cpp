@@ -3,16 +3,6 @@
  * SPDX-FileCopyrightText: Hsia-Jun(Randy) Li
  */
 
-#include <coroutine>
-#include <net_packet.hpp>
-#include <worker_interface.hpp>
-
-#include "virtual_netdev.hpp"
-#include "userspace_tcp_stack_helper.hpp"
-#include <asio.hpp>
-#include <asio/awaitable.hpp>
-#include <asio/experimental/coro.hpp>
-
 using namespace celaratcp;
 
 #if 0
@@ -84,7 +74,8 @@ int main1(int argc, char *argv[])
 }
 #endif
 
-asio::awaitable<void> run2()
+asio::awaitable<void>
+run2()
 {
   auto executor = co_await asio::this_coro::executor;
 
@@ -95,25 +86,28 @@ asio::awaitable<void> run2()
   recycle::shared_pool<Ipv4TcpHdrPacket> hdrPool;
   hdrPool.reserve(20);
 
-  AsyncUserspaceTcpStack<asio::ip::address_v4> tcpStack(executor, std::ref(tun), hdrPool);
+  AsyncUserspaceTcpStack<asio::ip::address_v4> tcpStack(
+      executor, std::ref(tun), hdrPool);
   tcpStack.setLocalAddress(net1.address());
   tcpStack.addSimpleService(5162);
 
-  recycle::shared_pool<NetPacketSW<regularMtu - ipv4HdrSize>> payloadPool;
+  recycle::shared_pool<NetPacketSW<regularMtu - ipv4HdrSize> > payloadPool;
   payloadPool.reserve(20);
 
   auto hdr = hdrPool.allocate();
   auto payload = payloadPool.allocate();
-  std::list<asio::mutable_buffer> mbufs = {hdr->getMutableBuf(), payload->getMutableBuf()};
+  std::list<asio::mutable_buffer> mbufs
+      = { hdr->getMutableBuf(), payload->getMutableBuf() };
 
   auto length = co_await tun.async_read(mbufs);
   if (length > 0) {
-    std::vector<std::shared_ptr<NetPacket>> packets = {hdr, payload};
+    std::vector<std::shared_ptr<NetPacket> > packets = { hdr, payload };
     co_await tcpStack.processIncomingPackets(packets);
   }
 }
 
-int main2(int argc, char *argv[])
+int
+main2(int argc, char *argv[])
 {
   asio::io_context ioc;
   asio::co_spawn(ioc, run2(), asio::detached);
@@ -121,8 +115,50 @@ int main2(int argc, char *argv[])
   return 0;
 }
 
-int main(int argc, char *argv[])
+int
+testSimpleAllocPool()
 {
+  {
+    memmanger::SimpleHeapAllocator<NetMemChunk> alloc(40);
+
+    recycle::shared_pool<NetMemChunk> pool(
+        [&alloc]() { return alloc.allocation(); });
+    pool.reserve(2);
+
+    auto packet = pool.allocate();
+
+    {
+      std::cout << "free " << pool.unused_resources() << std::endl;
+      auto packet = pool.allocate();
+      std::cout << "free " << pool.unused_resources() << std::endl;
+    }
+    pool.free_unused();
+  }
+
+  {
+    memmanger::SimpleVectorAllocator<NetMemChunk> alloc(40);
+
+    recycle::shared_pool<NetMemChunk> pool(
+        [&alloc]() { return alloc.allocation(); });
+    pool.reserve(2);
+
+    auto packet = pool.allocate();
+
+    {
+      std::cout << "free " << pool.unused_resources() << std::endl;
+      auto packet = pool.allocate();
+      std::cout << "free " << pool.unused_resources() << std::endl;
+    }
+    pool.free_unused();
+  }
+
+  return 0;
+}
+
+int
+main(int argc, char *argv[])
+{
+  testSimpleAllocPool();
   main2(argc, argv);
 
   return 0;
