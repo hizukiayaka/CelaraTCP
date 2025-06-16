@@ -71,23 +71,19 @@ private:
   static constexpr std::size_t totalSize = (Ns + ...);
   std::array<unsigned char, totalSize> data_;
 
-  asio::const_buffer cbuf_;
-  asio::mutable_buffer mbuf_;
-
 public:
-  explicit NetPacketSW()
-      : cbuf_(asio::buffer(data_)), mbuf_(asio::buffer(data_)) {};
+  explicit NetPacketSW() : data_() {}
 
   virtual asio::const_buffer
   getConstBuf() override
   {
-    return cbuf_;
+    return asio::buffer(data_.data(), usedBytes);
   }
 
   virtual asio::mutable_buffer
   getMutableBuf() override
   {
-    return mbuf_;
+    return asio::buffer(data_.data(), usedBytes);
   }
 
   virtual constexpr std::size_t
@@ -103,8 +99,6 @@ public:
       return false;
 
     usedBytes = bytes;
-    cbuf_ = asio::buffer(data_, bytes);
-    mbuf_ = asio::buffer(data_, bytes);
 
     return true;
   }
@@ -131,50 +125,53 @@ class NetMemChunk : public NetPacket
 {
 private:
   std::span<uint8_t> chunk_;
-  asio::const_buffer cbuf_;
-  asio::mutable_buffer mbuf_;
   std::unique_ptr<uint8_t> meta_buf_;
 
 public:
-  template<typename It>
-  NetMemChunk(It first, std::size_t count, std::unique_ptr<uint8_t> meta = std::nullptr)
-      : chunk_(first, count), cbuf_(chunk_), mbuf_(chunk_), meta_buf_(std::move(meta))
+  template <typename It>
+  NetMemChunk(It first, std::size_t count,
+              std::unique_ptr<uint8_t> meta = nullptr)
+      : chunk_(first, count), meta_buf_(std::move(meta))
   {
   }
 
-  template<typename It, typename End>
-  NetMemChunk(It first, End last, std::unique_ptr<uint8_t> meta = std::nullptr)
-      : chunk_(first, last), cbuf_(chunk_), mbuf_(chunk_), meta_buf_(std::move(meta))
+  template <typename It, typename End>
+  NetMemChunk(It first, End last, std::unique_ptr<uint8_t> meta = nullptr)
+      : chunk_(first, last), meta_buf_(std::move(meta))
+  {
+  }
+
+  template <typename Container>
+  NetMemChunk(Container &cont)
+      : chunk_(reinterpret_cast<uint8_t *>(std::data(cont)), std::size(cont))
   {
   }
 
   virtual asio::const_buffer
   getConstBuf() override
   {
-    return cbuf_;
+    return asio::buffer(chunk_.data(), chunk_.size_bytes());
   }
 
   virtual asio::mutable_buffer
   getMutableBuf() override
   {
-    return mbuf_;
+    return asio::buffer(chunk_.data(), chunk_.size_bytes());
   }
 
   virtual constexpr std::size_t
   getMaximumSize() override
   {
-    return chunk_.size();
+    return chunk_.size_bytes();
   }
 
   virtual bool
   setUsedBytes(uint_fast16_t bytes) override
   {
-    if (bytes > chunk_.size())
+    if (bytes > chunk_.size_bytes())
       return false;
 
     usedBytes = bytes;
-    cbuf_ = asio::buffer(chunk_, bytes);
-    mbuf_ = asio::buffer(chunk_, bytes);
 
     return true;
   }
