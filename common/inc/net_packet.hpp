@@ -12,18 +12,18 @@
 #include <asio/buffer.hpp>
 
 namespace celaratcp {
-constexpr uint_fast16_t regularMtu = 1500;
-constexpr uint_fast16_t pppoeMtu = 1492;
-constexpr uint_fast16_t ipv4HdrSize = 20;
-constexpr uint_fast16_t ipv6HdrSize = 40;
-constexpr uint_fast16_t tcpHdrMinimalSize = 18;
-constexpr uint_fast16_t udpHdrSize = 8;
-constexpr uint_fast16_t Udp6Payload = regularMtu - ipv6HdrSize - 8;
+constexpr uint_fast16_t kRegularMtu = 1500;
+constexpr uint_fast16_t kPPPoEMtu = 1492;
+constexpr uint_fast16_t kIpv4HdrSize = 20;
+constexpr uint_fast16_t kIpv6HdrSize = 40;
+constexpr uint_fast16_t kTcpHdrMinimalSize = 18;
+constexpr uint_fast16_t kUdpHdrSize = 8;
+constexpr uint_fast16_t kUdp6Payload = kRegularMtu - kIpv6HdrSize - 8;
 
 class NetPacket
 {
 protected:
-  uint_fast16_t usedBytes{ 0 };
+  uint_fast16_t used_bytes{ 0 };
 
 public:
   class MetaData
@@ -39,19 +39,19 @@ public:
 
   virtual asio::mutable_buffer getMutableBuf() = 0;
 
-  virtual std::span<unsigned char> getData() = 0;
-  virtual constexpr std::size_t getMaximumSize() = 0;
+  virtual std::span<unsigned char> GetData() = 0;
+  virtual constexpr std::size_t GetMaximumSize() = 0;
 
   uint_fast16_t
-  getUsedBytes() const
+  GetUsedBytes() const
   {
-    return usedBytes;
+    return used_bytes;
   }
 
   virtual bool
-  setUsedBytes(uint_fast16_t bytes)
+  SetUsedBytes(uint_fast16_t bytes)
   {
-    usedBytes = bytes;
+    used_bytes = bytes;
     return true;
   }
 };
@@ -68,8 +68,8 @@ template <typename T> concept NetPacketContainer = requires
 template <std::size_t... Ns> class NetPacketSW : public NetPacket
 {
 private:
-  static constexpr std::size_t totalSize = (Ns + ...);
-  std::array<unsigned char, totalSize> data_;
+  static constexpr std::size_t kTotalSize = (Ns + ...);
+  std::array<unsigned char, kTotalSize> data_;
 
 public:
   explicit NetPacketSW() : data_() {}
@@ -77,49 +77,49 @@ public:
   virtual asio::const_buffer
   getConstBuf() override
   {
-    return asio::buffer(data_.data(), usedBytes);
+    return asio::buffer(data_.data(), used_bytes);
   }
 
   virtual asio::mutable_buffer
   getMutableBuf() override
   {
-    return asio::buffer(data_.data(), usedBytes);
+    return asio::buffer(data_.data(), used_bytes);
   }
 
   virtual constexpr std::size_t
-  getMaximumSize() override
+  GetMaximumSize() override
   {
-    return totalSize;
+    return kTotalSize;
   }
 
   virtual bool
-  setUsedBytes(uint_fast16_t bytes) override
+  SetUsedBytes(uint_fast16_t bytes) override
   {
     if (bytes > data_.max_size())
       return false;
 
-    usedBytes = bytes;
+    used_bytes = bytes;
 
     return true;
   }
 
   std::span<unsigned char>
-  getData() override
+  GetData() override
   {
     return std::span<unsigned char>(data_.begin(), data_.end());
   };
 
-  std::array<unsigned char, totalSize>
+  std::array<unsigned char, kTotalSize>
   getStorageBuffer()
   {
     return data_;
   };
 };
 
-using Ipv4TcpHdrPacket = NetPacketSW<ipv4HdrSize, tcpHdrMinimalSize>;
-using Ipv6TcpHdrPacket = NetPacketSW<ipv6HdrSize, tcpHdrMinimalSize>;
-using Ipv4UdpHdrPacket = NetPacketSW<ipv4HdrSize, udpHdrSize>;
-using Ipv6UdpHdrPacket = NetPacketSW<ipv6HdrSize, udpHdrSize>;
+using Ipv4TcpHdrPacket = NetPacketSW<kIpv4HdrSize, kTcpHdrMinimalSize>;
+using Ipv6TcpHdrPacket = NetPacketSW<kIpv6HdrSize, kTcpHdrMinimalSize>;
+using Ipv4UdpHdrPacket = NetPacketSW<kIpv4HdrSize, kUdpHdrSize>;
+using Ipv6UdpHdrPacket = NetPacketSW<kIpv6HdrSize, kUdpHdrSize>;
 
 class NetMemChunk : public NetPacket
 {
@@ -162,24 +162,24 @@ public:
   }
 
   virtual constexpr std::size_t
-  getMaximumSize() override
+  GetMaximumSize() override
   {
     return chunk_.size_bytes();
   }
 
   virtual bool
-  setUsedBytes(uint_fast16_t bytes) override
+  SetUsedBytes(uint_fast16_t bytes) override
   {
     if (bytes > chunk_.size_bytes())
       return false;
 
-    usedBytes = bytes;
+    used_bytes = bytes;
 
     return true;
   }
 
   std::span<unsigned char>
-  getData() override
+  GetData() override
   {
     return chunk_;
   };
