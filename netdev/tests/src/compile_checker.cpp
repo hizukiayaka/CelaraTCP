@@ -3,6 +3,16 @@
  * SPDX-FileCopyrightText: Hsia-Jun(Randy) Li
  */
 
+#include <coroutine>
+#include <net_packet.hpp>
+#include <worker_interface.hpp>
+
+#include "virtual_netdev.hpp"
+#include "userspace_tcp_stack_helper.hpp"
+#include <asio.hpp>
+#include <asio/awaitable.hpp>
+#include <asio/experimental/coro.hpp>
+
 using namespace celaratcp;
 
 #if 0
@@ -10,7 +20,7 @@ class manger{
 public:
   SyncUserspaceTcpStack<asio::ip::address_v4> &tcpStack_;
   recycle::shared_pool<Ipv4TcpHdrPacket> hdrPool_;
-  recycle::shared_pool<NetPacketSW<regularMtu - ipv4HdrSize>> payloadPool_;
+  recycle::shared_pool<NetPacketSW<kRegularMtu - kIpv4HdrSize>> payloadPool_;
 public:
   manger(SyncUserspaceTcpStack<asio::ip::address_v4> &tcpStack) : tcpStack_(tcpStack), hdrPool_(), payloadPool_() {
     hdrPool_.reserve(20);
@@ -32,7 +42,7 @@ int main1(int argc, char *argv[])
 
   recycle::shared_pool<Ipv4TcpHdrPacket> hdrPool;
   hdrPool.reserve(20);
-  recycle::shared_pool<NetPacketSW<regularMtu - ipv4HdrSize>> payloadPool;
+  recycle::shared_pool<NetPacketSW<kRegularMtu - kIpv4HdrSize>> payloadPool;
   payloadPool.reserve(20);
 
   auto hdr = hdrPool.allocate();
@@ -41,7 +51,7 @@ int main1(int argc, char *argv[])
   std::forward_list<std::shared_ptr<NetPacket>> packets = {hdr, payload};
 
   auto readHandler = [&tun, &tcpStack, &hdrPool, &payloadPool](auto&& readHandler, std::shared_ptr<Ipv4TcpHdrPacket> hdr,
-    std::shared_ptr<NetPacketSW<regularMtu - ipv4HdrSize>> payload, std::error_code ec, std::size_t bytes_transferred) {
+    std::shared_ptr<NetPacketSW<kRegularMtu - kIpv4HdrSize>> payload, std::error_code ec, std::size_t bytes_transferred) {
     if (ec) {
       std::cerr << "Error: " << ec.message() << "\n";
       return;
@@ -83,23 +93,27 @@ run2()
   netdev::VirtualNetDev tun(executor, "test0", net1.address());
   netdev::IPacketFilter *filter = tun;
 
-  recycle::shared_pool<Ipv4TcpHdrPacket> hdrPool;
-  hdrPool.reserve(20);
+  memmanger::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
+
+  auto hdr_pool = std::make_shared<recycle::shared_pool<NetMemChunk>>(
+      [&alloc]() { return alloc.Allocation(); });
+
+  hdr_pool->reserve(20);
 
   AsyncUserspaceTcpStack<asio::ip::address_v4> tcpStack(
-      executor, std::ref(tun), hdrPool);
+      executor, std::ref(tun), hdr_pool);
   tcpStack.setLocalAddress(net1.address());
   tcpStack.addSimpleService(5162);
 
-  recycle::shared_pool<NetPacketSW<regularMtu - ipv4HdrSize> > payloadPool;
+  recycle::shared_pool<NetPacketSW<kRegularMtu - kIpv4HdrSize> > payloadPool;
   payloadPool.reserve(20);
 
-  auto hdr = hdrPool.allocate();
+  auto hdr = hdr_pool->allocate();
   auto payload = payloadPool.allocate();
   std::list<asio::mutable_buffer> mbufs
       = { hdr->getMutableBuf(), payload->getMutableBuf() };
 
-  auto length = co_await tun.async_read(mbufs);
+  auto length = co_await asio::async_read(tun, mbufs, asio::use_awaitable);
   if (length > 0) {
     std::vector<std::shared_ptr<NetPacket> > packets = { hdr, payload };
     co_await tcpStack.processIncomingPackets(packets);
@@ -119,7 +133,7 @@ int
 testSimpleAllocPool()
 {
   {
-    memmanger::SimpleHeapAllocator<NetMemChunk> alloc(40);
+    memmanger::SimpleHeapAllocator<NetMemChunk> alloc(kIpv6HdrSize);
 
     recycle::shared_pool<NetMemChunk> pool(
         [&alloc]() { return alloc.Allocation(); });
@@ -136,7 +150,7 @@ testSimpleAllocPool()
   }
 
   {
-    memmanger::SimpleVectorAllocator<NetMemChunk> alloc(40);
+    memmanger::SimpleVectorAllocator<NetMemChunk> alloc(kIpv6HdrSize);
 
     recycle::shared_pool<NetMemChunk> pool(
         [&alloc]() { return alloc.Allocation(); });
@@ -156,7 +170,7 @@ testSimpleAllocPool()
     std::vector<uint8_t> mems(2000);
     {
       auto alloc = memmanger::ManagedMemAllocator<NetMemChunk>::Create(
-          mems.data(), mems.capacity(), 40, [&mems]() {
+          mems.data(), mems.capacity(), kIpv6HdrSize, [&mems]() {
             mems.clear();
             mems.shrink_to_fit();
           });
