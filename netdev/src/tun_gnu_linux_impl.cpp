@@ -5,106 +5,125 @@
 
 extern "C"
 {
-#include "ebpf/xmit_filter.bpf.h"
+#include <linux/if_tun.h>
+#include <netlink/route/addr.h>
+#include <netlink/route/link.h>
+#include <netlink/route/route.h>
+#include <netlink/socket.h>
+
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+
+#include "xmit_filter.bpf.h"
 }
 
 namespace celaratcp {
 namespace netdev {
 
-VirtualNetDev::TunGnuLinuxImpl::~TunGnuLinuxImpl()
+class TunGnuLinuxImpl::TunGnuLinuxDetailImpl : public IPacketFilter
+{
+private:
+  struct nl_sock *sk_;
+  struct rtnl_link *link_;
+  int ifindex_;
+  struct bpf_object *filter_obj_;
+  struct bpf_object *steering_obj_;
+  struct bpf_program *filter_prog_;
+  struct bpf_program *steering_prog_;
+  int filter_map_fd_;
+  int services_v4_mapfd_;
+  int services_v6_mapfd_;
+
+  struct PeerEntry
+  {
+    asio::ip::address src_addr;
+    std::uint16_t src_port;
+  };
+
+  struct PortMapFdPair
+  {
+    std::uint16_t port;
+    int map_fd;
+    std::vector<std::optional<PeerEntry> > peers;
+  };
+
+  std::list<PortMapFdPair> services_mapfd_v4_list_;
+  std::list<PortMapFdPair> services_mapfd_v6_list_;
+
+  bool attachXdpProgram(const std::string &xdp_program_path);
+  bool attachSteeringEbpf(const std::string &ebpf_program_path);
+
+public:
+  TunGnuLinuxDetailImpl();
+  ~TunGnuLinuxDetailImpl() override;
+
+  void Initialize(const std::string &intl_name);
+  void AddIpv4Address(const asio::ip::address_v4 &addr);
+  void AddIpv6Address(const asio::ip::address_v6 &addr);
+
+  bool Up();
+  bool Down();
+
+  int LoadFilterEbpf(const std::string &ebpf_program_path,
+                     std::function<bool(int prog_fd)> &&on_load_callback);
+
+  std::list<NetDevFiltertype> GetSupportFilterType() const override;
+  bool SetNetDevFilterType(std::list<NetDevFiltertype> type) override;
+  bool AddWatchIpv4Port(uint16_t port) override;
+  bool AddWatchIpv6Port(uint16_t port) override;
+  bool RemoveWatchIpv4Port(uint16_t port) override;
+  bool RemoveWatchIpv6Port(uint16_t port) override;
+  bool AddPeerNode(const asio::ip::address &addr, uint16_t src_port,
+                   uint16_t dst_port) override;
+  bool RemovePeerNode(const asio::ip::address &addr, uint16_t src_port,
+                      uint16_t dst_port) override;
+
+  TunGnuLinuxDetailImpl(const TunGnuLinuxDetailImpl &other) = delete;
+  TunGnuLinuxDetailImpl &operator=(const TunGnuLinuxDetailImpl &other)
+      = delete;
+  TunGnuLinuxDetailImpl(TunGnuLinuxDetailImpl &&other) = delete;
+  TunGnuLinuxDetailImpl &operator=(TunGnuLinuxDetailImpl &&other) = delete;
+};
+
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::TunGnuLinuxDetailImpl()
+    : sk_(nullptr), link_(nullptr), ifindex_(-1), filter_obj_(nullptr),
+      steering_obj_(nullptr), filter_prog_(nullptr), steering_prog_(nullptr),
+      filter_map_fd_(-1), services_v4_mapfd_(-1), services_v6_mapfd_(-1)
+{
+}
+
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::~TunGnuLinuxDetailImpl()
 {
   nl_socket_free(sk_);
-  stream_.close();
 
   if (filter_obj_)
     bpf_object__close(filter_obj_);
 }
 
-#if 0
-// FIXME: we should not use the default io_context
-TunGnuLinuxImpl::TunGnuLinuxImpl(const TunGnuLinuxImpl &other)
-  : stream_(other.stream_.get_executor())
+void
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::Initialize(
+    const std::string &intl_name)
 {
-  int fd;
-  if ((fd = open("/dev/net/tun", O_RDWR)) < 0)
-    throw std::runtime_error("can't open tun control");
-
-  struct ifreq ifr;
-  auto err = ioctl(other.stream_.native_handle(), TUNGETIFF, &ifr);
-  if (err)
-    {
-      close(fd);
-      throw std::runtime_error("failed to get the master device's name");
-    }
-
-  ifr.ifr_flags = IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE;
-  err = ioctl(fd, TUNSETIFF, (void *)&ifr);
-  if (err)
-    {
-      close(fd);
-      throw std::runtime_error("failed to create tun");
-    }
-
-  stream_.assign(fd);
-  ifindex_ = other.ifindex_;
-  sk_ = other.sk_;
-}
-#endif
-
-VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
-                                                const std::string &intl_name)
-    : stream_(ex), strand_read_(ex), strand_write_(ex), link_(nullptr),
-      ifindex_(-1), isMasterNode_(false), isClient_(false)
-{
-  struct ifreq ifr;
-
-  memset(&ifr, 0, sizeof(ifr));
-  strncpy(ifr.ifr_name, intl_name.c_str(), IFNAMSIZ);
-  ifr.ifr_flags = IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE;
-
-  int fd;
-  if ((fd = open("/dev/net/tun", O_RDWR)) < 0)
-    throw std::runtime_error("can't open tun control");
-
-  auto err = ioctl(fd, TUNSETIFF, (void *)&ifr);
-  if (err) {
-    close(fd);
-    throw std::runtime_error("failed to create tun");
-  }
-
-  err = ioctl(fd, TUNSETOFFLOAD, TUN_F_CSUM);
-  if (err) {
-    close(fd);
-    throw std::runtime_error("failed to disable checksum");
-  }
-
   ifindex_ = if_nametoindex(intl_name.c_str());
-  stream_.assign(fd);
 
   sk_ = nl_socket_alloc();
-  err = nl_connect(sk_, NETLINK_ROUTE);
+  auto err = nl_connect(sk_, NETLINK_ROUTE);
   if (err) {
     nl_socket_free(sk_);
-    close(fd);
     throw std::runtime_error("failed to connect to netlink");
   }
 
   err = rtnl_link_get_kernel(sk_, ifindex_, nullptr, &link_);
   if (err) {
     nl_socket_free(sk_);
-    close(fd);
     throw std::runtime_error("failed to get link");
   }
-
-  isMasterNode_ = true;
 }
 
-VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(
-    asio::any_io_executor &ex, const std::string &intl_name,
+void
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv4Address(
     const asio::ip::address_v4 &addr)
-    : TunGnuLinuxImpl(ex, intl_name)
 {
-  isClient_ = true;
   auto addr_d = addr.to_bytes();
   struct nl_addr *local_addr
       = nl_addr_build(AF_INET, addr_d.data(), addr_d.size());
@@ -123,8 +142,28 @@ VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(
   rtnl_addr_put(rt_addr);
 }
 
+void
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv6Address(
+    const asio::ip::address_v6 &addr)
+{
+  auto addr_d = addr.to_bytes();
+  struct nl_addr *local_addr
+      = nl_addr_build(AF_INET6, addr_d.data(), addr_d.size());
+  struct rtnl_addr *rt_addr = rtnl_addr_alloc();
+
+  rtnl_addr_set_ifindex(rt_addr, ifindex_);
+  rtnl_addr_set_local(rt_addr, local_addr);
+  if (rtnl_addr_add(sk_, rt_addr, 0)) {
+    nl_addr_put(local_addr);
+    rtnl_addr_put(rt_addr);
+    throw std::runtime_error("can't set addr");
+  }
+  nl_addr_put(local_addr);
+  rtnl_addr_put(rt_addr);
+}
+
 bool
-VirtualNetDev::TunGnuLinuxImpl::attachXdpProgram(
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::attachXdpProgram(
     const std::string &xdp_program_path)
 {
   int prog_fd = bpf_obj_get(xdp_program_path.c_str());
@@ -141,21 +180,21 @@ VirtualNetDev::TunGnuLinuxImpl::attachXdpProgram(
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::attachSteeringEbpf(
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::attachSteeringEbpf(
     const std::string &ebpf_program_path)
 {
   return false;
 }
 
 std::list<NetDevFiltertype>
-VirtualNetDev::TunGnuLinuxImpl::getSupportFilterType() const
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::GetSupportFilterType() const
 {
   return { NetDevFiltertype::DROP_IPV4, NetDevFiltertype::DROP_IPV6,
            NetDevFiltertype::DROP_UDP, NetDevFiltertype::ACCEPT_4_TUPLE };
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::setNetDevFilterType(
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetNetDevFilterType(
     std::list<NetDevFiltertype> type)
 {
   if (filter_map_fd_ < 0) {
@@ -187,7 +226,7 @@ VirtualNetDev::TunGnuLinuxImpl::setNetDevFilterType(
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::addWatchIpv4Port(uint16_t port)
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv4Port(uint16_t port)
 {
   if (services_v4_mapfd_ < 0) {
     return false;
@@ -218,7 +257,7 @@ VirtualNetDev::TunGnuLinuxImpl::addWatchIpv4Port(uint16_t port)
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::addWatchIpv6Port(uint16_t port)
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv6Port(uint16_t port)
 {
   if (services_v6_mapfd_ < 0) {
     return false;
@@ -249,7 +288,7 @@ VirtualNetDev::TunGnuLinuxImpl::addWatchIpv6Port(uint16_t port)
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::removeWatchIpv4Port(uint16_t port)
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemoveWatchIpv4Port(uint16_t port)
 {
   if (services_v4_mapfd_ < 0) {
     return false;
@@ -267,7 +306,7 @@ VirtualNetDev::TunGnuLinuxImpl::removeWatchIpv4Port(uint16_t port)
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::removeWatchIpv6Port(uint16_t port)
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemoveWatchIpv6Port(uint16_t port)
 {
   if (services_v6_mapfd_ < 0) {
     return false;
@@ -286,9 +325,8 @@ VirtualNetDev::TunGnuLinuxImpl::removeWatchIpv6Port(uint16_t port)
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::addPeerNode(const asio::ip::address &addr,
-                                            uint16_t src_port,
-                                            uint16_t dst_port)
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddPeerNode(
+    const asio::ip::address &addr, uint16_t src_port, uint16_t dst_port)
 {
   constexpr size_t MAX_PEERS
       = 64; // or use PER_SERVICE_MAX_CONNECTION if defined
@@ -395,9 +433,8 @@ VirtualNetDev::TunGnuLinuxImpl::addPeerNode(const asio::ip::address &addr,
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::removePeerNode(const asio::ip::address &addr,
-                                               uint16_t src_port,
-                                               uint16_t dst_port)
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemovePeerNode(
+    const asio::ip::address &addr, uint16_t src_port, uint16_t dst_port)
 {
   if (addr.is_v4()) {
     if (services_v4_mapfd_ < 0) {
@@ -466,18 +503,18 @@ VirtualNetDev::TunGnuLinuxImpl::removePeerNode(const asio::ip::address &addr,
   return false;
 }
 
-bool
-VirtualNetDev::TunGnuLinuxImpl::attachFilterEbpf(
-    const std::string &ebpf_program_path)
+int
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilterEbpf(
+    const std::string &ebpf_program_path,
+    std::function<bool(int prog_fd)> &&on_load_callback)
 {
   struct bpf_object *obj
       = bpf_object__open_file(ebpf_program_path.c_str(), nullptr);
   if (!obj) {
-    fprintf(stderr, "Failed to open eBPF object file\n");
     return false;
   }
+
   if (bpf_object__load(obj)) {
-    fprintf(stderr, "Failed to load eBPF object\n");
     bpf_object__close(obj);
     return false;
   }
@@ -485,20 +522,17 @@ VirtualNetDev::TunGnuLinuxImpl::attachFilterEbpf(
   filter_obj_ = obj;
   filter_prog_ = bpf_object__find_program_by_name(obj, "socket_handler");
   if (!filter_prog_) {
-    fprintf(stderr, "Failed to find eBPF program by name\n");
     bpf_object__close(obj);
     return false;
   }
 
   int prog_fd = bpf_program__fd(filter_prog_);
   if (prog_fd < 0) {
-    fprintf(stderr, "Failed to get program fd\n");
     bpf_object__close(obj);
     return false;
   }
 
-  if (ioctl(stream_.native_handle(), TUNSETFILTEREBPF, prog_fd) < 0) {
-    perror("Failed to attach eBPF program with TUNSETFILTEREBPF");
+  if (!on_load_callback(prog_fd)) {
     bpf_object__close(obj);
     return false;
   }
@@ -528,24 +562,8 @@ VirtualNetDev::TunGnuLinuxImpl::attachFilterEbpf(
   return true;
 }
 
-void
-VirtualNetDev::TunGnuLinuxImpl::async_read(NetPacket &buf,
-                                           callback_t &&callback)
-{
-  auto mbuf = buf.getMutableBuf();
-  asio::async_read(stream_, mbuf, std::move(callback));
-}
-
-void
-VirtualNetDev::TunGnuLinuxImpl::async_write(NetPacket &buf,
-                                            callback_t &&callback)
-{
-  auto cbuf = buf.getConstBuf();
-  asio::async_write(stream_, cbuf, std::move(callback));
-}
-
 bool
-VirtualNetDev::TunGnuLinuxImpl::up()
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::Up()
 {
   auto flags = rtnl_link_get_flags(link_);
   if (flags & IFF_UP) {
@@ -564,7 +582,7 @@ VirtualNetDev::TunGnuLinuxImpl::up()
 }
 
 bool
-VirtualNetDev::TunGnuLinuxImpl::down()
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::Down()
 {
   auto flags = rtnl_link_get_flags(link_);
   if (!(flags & IFF_UP)) {
@@ -581,12 +599,149 @@ VirtualNetDev::TunGnuLinuxImpl::down()
   return true;
 }
 
+TunGnuLinuxImpl::~TunGnuLinuxImpl() { stream_.close(); }
+
+TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
+                                 const std::string &intl_name)
+    : pImpl_(std::make_unique<TunGnuLinuxDetailImpl>()), stream_(ex),
+      is_master_node_(false), is_client_(false)
+{
+  struct ifreq ifr;
+
+  memset(&ifr, 0, sizeof(ifr));
+  strncpy(ifr.ifr_name, intl_name.c_str(), IFNAMSIZ);
+  ifr.ifr_flags = IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE;
+
+  int fd;
+  if ((fd = open("/dev/net/tun", O_RDWR)) < 0)
+    throw std::runtime_error("can't open tun control");
+
+  auto err = ioctl(fd, TUNSETIFF, (void *)&ifr);
+  if (err) {
+    close(fd);
+    throw std::runtime_error("failed to create tun");
+  }
+
+  err = ioctl(fd, TUNSETOFFLOAD, TUN_F_CSUM);
+  if (err) {
+    close(fd);
+    throw std::runtime_error("failed to disable checksum");
+  }
+
+  stream_.assign(fd);
+
+  pImpl_->Initialize(intl_name);
+
+  is_master_node_ = true;
+}
+
+TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
+                                 const std::string &intl_name,
+                                 const asio::ip::address_v4 &addr)
+    : TunGnuLinuxImpl(ex, intl_name)
+{
+  pImpl_->AddIpv4Address(addr);
+}
+
+bool
+TunGnuLinuxImpl::AttachFilterEbpf(const std::string &ebpf_program_path)
+{
+  return pImpl_->LoadFilterEbpf(ebpf_program_path, [this](int prog_fd) {
+    if (ioctl(this->stream_.native_handle(), TUNSETFILTEREBPF, prog_fd) < 0)
+      return false;
+    return true;
+  });
+}
+
+bool
+TunGnuLinuxImpl::Up()
+{
+  return pImpl_->Up();
+}
+bool
+TunGnuLinuxImpl::Down()
+{
+  return pImpl_->Down();
+}
+
+std::list<NetDevFiltertype>
+TunGnuLinuxImpl::GetSupportFilterType() const
+{
+  return pImpl_->GetSupportFilterType();
+}
+bool
+TunGnuLinuxImpl::SetNetDevFilterType(std::list<NetDevFiltertype> type)
+{
+  return pImpl_->SetNetDevFilterType(type);
+}
+bool
+TunGnuLinuxImpl::AddWatchIpv4Port(uint16_t port)
+{
+  return pImpl_->AddWatchIpv4Port(port);
+}
+bool
+TunGnuLinuxImpl::AddWatchIpv6Port(uint16_t port)
+{
+  return pImpl_->AddWatchIpv6Port(port);
+}
+bool
+TunGnuLinuxImpl::RemoveWatchIpv4Port(uint16_t port)
+{
+  return pImpl_->RemoveWatchIpv4Port(port);
+}
+bool
+TunGnuLinuxImpl::RemoveWatchIpv6Port(uint16_t port)
+{
+  return pImpl_->RemoveWatchIpv6Port(port);
+}
+bool
+TunGnuLinuxImpl::AddPeerNode(const asio::ip::address &addr, uint16_t src_port,
+                             uint16_t dst_port)
+{
+  return pImpl_->AddPeerNode(addr, src_port, dst_port);
+}
+bool
+TunGnuLinuxImpl::RemovePeerNode(const asio::ip::address &addr,
+                                uint16_t src_port, uint16_t dst_port)
+{
+  return pImpl_->RemovePeerNode(addr, src_port, dst_port);
+}
+
 #if 0
+// FIXME: we should not use the default io_context
+TunGnuLinuxImpl::TunGnuLinuxImpl(const TunGnuLinuxImpl &other)
+  : stream_(other.stream_.get_executor())
+{
+  int fd;
+  if ((fd = open("/dev/net/tun", O_RDWR)) < 0)
+    throw std::runtime_error("can't open tun control");
+
+  struct ifreq ifr;
+  auto err = ioctl(other.stream_.native_handle(), TUNGETIFF, &ifr);
+  if (err)
+    {
+      close(fd);
+      throw std::runtime_error("failed to get the master device's name");
+    }
+
+  ifr.ifr_flags = IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE;
+  err = ioctl(fd, TUNSETIFF, (void *)&ifr);
+  if (err)
+    {
+      close(fd);
+      throw std::runtime_error("failed to create tun");
+    }
+
+  stream_.assign(fd);
+  ifindex_ = other.ifindex_;
+  sk_ = other.sk_;
+}
+
 std::optional<TunGnuLinuxImpl>
-VirtualNetDev::TunGnuLinuxImpl::addNode(asio::ip::address_v4 &addr)
+TunGnuLinuxImpl::addNode(asio::ip::address_v4 &addr)
 {
   TunGnuLinuxImpl node(*this); // Use the copy constructor to create a copy
-  node.isMasterNode_ = false;
+  node.is_master_node_ = false;
   auto rt_entry = rtnl_route_alloc();
 
   auto addr_d = addr.to_bytes();
