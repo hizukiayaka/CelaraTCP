@@ -35,9 +35,9 @@ public:
   NetPacket() = default;
   virtual ~NetPacket() = default;
 
-  virtual asio::const_buffer getConstBuf() = 0;
+  virtual asio::const_buffer GetConstBuf() = 0;
 
-  virtual asio::mutable_buffer getMutableBuf() = 0;
+  virtual asio::mutable_buffer GetMutableBuf() = 0;
 
   virtual std::span<unsigned char> GetData() = 0;
   virtual constexpr std::size_t GetMaximumSize() = 0;
@@ -75,13 +75,13 @@ public:
   explicit NetPacketSW() : data_() {}
 
   virtual asio::const_buffer
-  getConstBuf() override
+  GetConstBuf() override
   {
     return asio::buffer(data_.data(), used_bytes);
   }
 
   virtual asio::mutable_buffer
-  getMutableBuf() override
+  GetMutableBuf() override
   {
     return asio::buffer(data_.data(), used_bytes);
   }
@@ -109,8 +109,8 @@ public:
     return std::span<unsigned char>(data_.begin(), data_.end());
   };
 
-  std::array<unsigned char, kTotalSize>
-  getStorageBuffer()
+  std::array<unsigned char, kTotalSize>&
+  GetStorageBuffer()
   {
     return data_;
   };
@@ -150,13 +150,13 @@ public:
   virtual ~NetMemChunk() = default;
 
   virtual asio::const_buffer
-  getConstBuf() override
+  GetConstBuf() override
   {
     return asio::buffer(chunk_.data(), chunk_.size_bytes());
   }
 
   virtual asio::mutable_buffer
-  getMutableBuf() override
+  GetMutableBuf() override
   {
     return asio::buffer(chunk_.data(), chunk_.size_bytes());
   }
