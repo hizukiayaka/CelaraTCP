@@ -47,7 +47,7 @@ int main1(int argc, char *argv[])
 
   auto hdr = hdrPool.allocate();
   auto payload = payloadPool.allocate();
-  std::list<asio::mutable_buffer> mbufs = {hdr->getMutableBuf(), payload->getMutableBuf()};
+  std::list<asio::mutable_buffer> mbufs = {hdr->GetMutableBuf(), payload->GetMutableBuf()};
   std::forward_list<std::shared_ptr<NetPacket>> packets = {hdr, payload};
 
   auto readHandler = [&tun, &tcpStack, &hdrPool, &payloadPool](auto&& readHandler, std::shared_ptr<Ipv4TcpHdrPacket> hdr,
@@ -56,12 +56,12 @@ int main1(int argc, char *argv[])
       std::cerr << "Error: " << ec.message() << "\n";
       return;
     }
-    tcpStack.filterIncomingPacket(hdr);
+    tcpStack.FilterIncomingPacket(hdr);
 
     hdr = hdrPool.allocate();
     payload = payloadPool.allocate();
 
-    std::forward_list<asio::mutable_buffer> packets = {hdr->getMutableBuf(), payload->getMutableBuf()};
+    std::forward_list<asio::mutable_buffer> packets = {hdr->GetMutableBuf(), payload->GetMutableBuf()};
 
     auto readCallback = std::bind(readHandler, std::ref(readHandler), hdr, payload, std::placeholders::_1, std::placeholders::_2);
     tun.async_read(packets, readCallback);
@@ -100,10 +100,9 @@ run2()
 
   hdr_pool->reserve(20);
 
-  AsyncUserspaceTcpStack<asio::ip::address_v4> tcpStack(
-      executor, std::ref(tun), hdr_pool);
-  tcpStack.setLocalAddress(net1.address());
-  tcpStack.addSimpleService(5162);
+  auto tcpStack = MakeAsyncTcpWrapper<asio::ip::address_v4>(executor, tun, hdr_pool);
+  tcpStack.SetLocalAddress(net1.address());
+  tcpStack.AddSimpleService(5162);
 
   recycle::shared_pool<NetPacketSW<kRegularMtu - kIpv4HdrSize> > payloadPool;
   payloadPool.reserve(20);
@@ -111,12 +110,12 @@ run2()
   auto hdr = hdr_pool->allocate();
   auto payload = payloadPool.allocate();
   std::list<asio::mutable_buffer> mbufs
-      = { hdr->getMutableBuf(), payload->getMutableBuf() };
+      = { hdr->GetMutableBuf(), payload->GetMutableBuf() };
 
   auto length = co_await asio::async_read(tun, mbufs, asio::use_awaitable);
   if (length > 0) {
     std::vector<std::shared_ptr<NetPacket> > packets = { hdr, payload };
-    co_await tcpStack.processIncomingPackets(packets);
+    co_await tcpStack.ProcessIncomingPackets(packets);
   }
 }
 
