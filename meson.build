@@ -1,7 +1,7 @@
 project(
     'celaratcp',
     'cpp',
-    version: '0.0.1',
+    version: '0.0.9',
     license: 'AGPL-3.0-or-later',
     meson_version: '>=1.2.0',
     default_options : [
@@ -14,8 +14,7 @@ project(
 add_project_arguments('-fcoroutines', language: ['cpp'])
 
 subdir('contrib')
-
-celaratcp_com_inc = include_directories('common/inc')
+subdir('common')
 
 subdir('netdev')
 subdir('netio')

@@ -13,8 +13,8 @@ netdev_inc = [include_directories('inc')]
 
 netdev_sources = ['src/virtual_netdev.cpp']
 
-if not is_variable('celaratcp_com_inc')
-  celaratcp_com_inc = include_directories('../common/inc')
+if not is_variable('common_inc')
+  common_inc = include_directories('../common/inc')
 endif
 
 libnl_dep = dependency('', required: false)
@@ -31,7 +31,7 @@ endif
 
 netdev = library('netdev',
     netdev_sources,
-    include_directories: [netdev_inc, celaratcp_com_inc],
+    include_directories: [netdev_inc, common_inc],
     dependencies: [libnl_dep, libbpf_dep],
     sources: netdev_ebpf_skeletons  # Ensure skeletons are generated first
 )
