@@ -616,7 +616,7 @@ TunGnuLinuxImpl::~TunGnuLinuxImpl() { stream_.close(); }
 TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
                                  const std::string &intl_name)
     : pImpl_(std::make_unique<TunGnuLinuxDetailImpl>()), stream_(ex),
-      is_master_node_(false), is_client_(false)
+      strand_write_(ex), is_master_node_(false), is_client_(false)
 {
   struct ifreq ifr;
 

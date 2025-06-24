@@ -6,8 +6,10 @@
 #ifndef TUN_GNU_LINUX_IMPL_HPP_
 #define TUN_GNU_LINUX_IMPL_HPP_
 
-#include <experimental/propagate_const>
+#include <asio/bind_executor.hpp>
 #include <asio/posix/stream_descriptor.hpp>
+#include <asio/strand.hpp>
+#include <experimental/propagate_const>
 
 #include "net_filter_inf.hpp"
 #include "virtual_netdev_base.hpp"
@@ -23,6 +25,7 @@ private:
       pImpl_;
 
   asio::posix::stream_descriptor stream_;
+  asio::strand<asio::any_io_executor> strand_write_;
 
   bool is_master_node_;
   bool is_client_;
@@ -48,7 +51,8 @@ public:
   auto
   write_some_impl(const Bufs &b, Token &&t)
   {
-    return stream_.async_write_some(b, std::forward<Token>(t));
+    return stream_.async_write_some(
+        b, asio::bind_executor(strand_write_, std::forward<Token>(t)));
   }
 
   bool Up() override;
