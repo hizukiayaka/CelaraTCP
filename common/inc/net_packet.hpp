@@ -57,13 +57,22 @@ public:
 };
 
 // Concept for containers holding items derived from NetPacket
-template <typename T> concept NetPacketContainer = requires
-{
-  typename std::remove_reference_t<T>::value_type;
-  requires std::is_base_of_v<
-      NetPacket, typename std::pointer_traits<typename std::remove_reference_t<
-                     T>::value_type>::element_type>;
-};
+template <typename T>
+concept NetPacketContainer =
+    // Case 1: T is a container with a value_type derived from NetPacket
+    (requires {
+      typename std::remove_reference_t<T>::value_type;
+      requires std::is_base_of_v<
+          NetPacket,
+          typename std::pointer_traits<
+              typename std::remove_reference_t<T>::value_type>::element_type>;
+    })
+    ||
+    // Case 2: T is a smart pointer to a type derived from NetPacket
+    (requires {
+      requires std::is_base_of_v<
+          NetPacket, typename std::pointer_traits<T>::element_type>;
+    });
 
 template <std::size_t... Ns> class NetPacketSW : public NetPacket
 {
@@ -109,7 +118,7 @@ public:
     return std::span<unsigned char>(data_.begin(), data_.end());
   };
 
-  std::array<unsigned char, kTotalSize>&
+  std::array<unsigned char, kTotalSize> &
   GetStorageBuffer()
   {
     return data_;
