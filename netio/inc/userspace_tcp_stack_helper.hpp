@@ -24,6 +24,7 @@ public:
   // compatibility
   using ChannelType = asio::experimental::channel<void(PacketContainer &&)>;
 
+#if 0
   using typename TcpConnection<AddrType>::TcpConnectionCtorArgs;
 
   TcpConnectionChan(const TcpConnectionCtorArgs &args,
@@ -33,6 +34,16 @@ public:
               return TcpConnection<AddrType>(params...);
             },
             args)),
+        rx_chan_(ex, 32)
+  {
+  }
+#endif
+
+  TcpConnectionChan(AddrType local_addr, uint_fast16_t local_port,
+                    AddrType remote_addr, uint_fast16_t remote_port,
+                    asio::any_io_executor &ex)
+      : TcpConnection<AddrType>(local_addr, local_port, remote_addr,
+                                remote_port),
         rx_chan_(ex, 32)
   {
   }
@@ -58,18 +69,24 @@ private:
   ChannelType rx_chan_;
 };
 
+template <typename AddrType, typename TcpConnectionT>
+concept HasRequiredConnTCtor
+    = requires(TcpConnectionT conn, AddrType local_addr,
+               uint_fast16_t local_port, AddrType remote_addr,
+               uint_fast16_t remote_port, asio::any_io_executor &ex)
+{
+  TcpConnectionT(local_addr, local_port, remote_addr, remote_port, ex);
+};
+
 using shared_netbuf_pool_t
     = std::shared_ptr<recycle::shared_pool<NetMemChunk> >;
 
 template <typename AddrType, typename TcpConnectionT, typename TcpServiceT,
           typename NetworkIOObjectT>
-class AsyncUserspaceTcpStack
+requires
+    HasRequiredConnTCtor<AddrType, TcpConnectionT> class AsyncUserspaceTcpStack
     : public UserspaceTcpStack<AddrType, TcpConnectionT, TcpServiceT>
 {
-private:
-  static_assert(std::is_base_of_v<TcpConnectionChan<AddrType>, TcpConnectionT>,
-                "TcpConnectionT must derive from TcpConnectionChan<AddrType>");
-
 protected:
   asio::any_io_executor &executor_;
   NetworkIOObjectT &nout_;

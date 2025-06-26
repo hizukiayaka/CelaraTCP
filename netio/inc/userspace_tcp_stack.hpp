@@ -413,12 +413,14 @@ template <typename AddrType, typename TcpConnectionT = TcpConnection<AddrType>,
           typename TcpServiceT = TcpService<AddrType, TcpConnectionT> >
 class UserspaceTcpStack
 {
+#if 0
   static_assert(std::is_base_of_v<TcpConnection<AddrType>, TcpConnectionT>,
                 "TcpConnectionT must derive from TcpConnection<AddrType>");
   static_assert(std::is_base_of_v<TcpService<AddrType>, TcpServiceT>
                     || std::is_base_of_v<TcpService<AddrType, TcpConnectionT>,
                                          TcpServiceT>,
                 "TcpServiceT must derive from TcpService");
+#endif
 
 protected:
   std::mutex mutex_;
