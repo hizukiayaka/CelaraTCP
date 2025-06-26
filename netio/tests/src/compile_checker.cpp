@@ -80,15 +80,24 @@ run2()
   auto executor = co_await asio::this_coro::executor;
 
   asio::ip::network_v4 net1(asio::ip::make_address_v4("169.254.3.1"), 32);
-  asio::posix::stream_descriptor stream (executor);
+  asio::posix::stream_descriptor stream(executor);
 
   memmanager::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
-  auto hdr_pool = std::make_shared<recycle::shared_pool<NetMemChunk>>(
-          [&alloc]() { return alloc.Allocation(); });
+  auto hdr_pool = std::make_shared<recycle::shared_pool<NetMemChunk> >(
+      [&alloc]() { return alloc.Allocation(); });
 
   hdr_pool->reserve(20);
 
-  auto tcpStack = netio::MakeAsyncTcpStack<asio::ip::address_v4>(executor, stream, hdr_pool);
+  auto conn_factory = [&executor](const asio::ip::address_v4 &local_addr,
+                                 uint_fast16_t local_port,
+                                 const asio::ip::address_v4 &remote_addr,
+                                 uint_fast16_t remote_port) {
+    return netio::TcpConnectionChan<asio::ip::address_v4>(
+        local_addr, local_port, remote_addr, remote_port, executor);
+  };
+
+  auto tcpStack = netio::MakeAsyncTcpStack<asio::ip::address_v4>(
+      executor, stream, hdr_pool, conn_factory);
   tcpStack.SetLocalAddress(net1.address());
   tcpStack.AddSimpleService(5162);
 }

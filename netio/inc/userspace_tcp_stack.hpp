@@ -317,6 +317,26 @@ public:
   template <typename, typename, typename> friend class UserspaceTcpStack;
 };
 
+template <typename AddrType, typename TcpConnectionT>
+class TcpConnectionTFactory
+{
+public:
+  using FactoryFunction = std::function<TcpConnectionT(
+      AddrType local_addr, uint_fast16_t local_port, AddrType remote_addr,
+      uint_fast16_t remote_port)>;
+
+  static TcpConnectionT
+  Create(AddrType local_addr, uint_fast16_t local_port, AddrType remote_addr,
+       uint_fast16_t remote_port)
+  {
+    return FactoryFunction{}(local_addr, local_port, remote_addr, remote_port);
+  }
+
+  using ConnectionType = decltype(std::declval<FactoryFunction>()(
+      std::declval<AddrType>(), std::declval<uint_fast16_t>(),
+      std::declval<AddrType>(), std::declval<uint_fast16_t>()));
+};
+
 template <typename AddrType,
           typename TcpConnectionT = TcpConnection<AddrType> >
 class TcpService

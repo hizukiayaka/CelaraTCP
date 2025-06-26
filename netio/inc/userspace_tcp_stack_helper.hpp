@@ -311,15 +311,19 @@ public:
   }
 };
 
-template <typename AddrType,
-          typename TcpConnectionT = TcpConnectionChan<AddrType>,
-          typename TcpServiceT = TcpService<AddrType, TcpConnectionT>,
-          typename NetworkIOObjectT>
+template <typename AddrType, typename NetworkIOObjectT,
+          typename FactoryFunction>
 auto
 MakeAsyncTcpStack(asio::any_io_executor &ex, NetworkIOObjectT &net_io,
-                  shared_netbuf_pool_t hdr_pool)
+                  shared_netbuf_pool_t hdr_pool, FactoryFunction factory)
 {
-  return AsyncUserspaceTcpStack<AddrType, TcpConnectionT, TcpServiceT,
+
+  using TcpConnectionTRealType = decltype(
+      factory(std::declval<AddrType>(), std::declval<uint_fast16_t>(),
+              std::declval<AddrType>(), std::declval<uint_fast16_t>()));
+
+  return AsyncUserspaceTcpStack<AddrType, TcpConnectionTRealType,
+                                TcpService<AddrType, TcpConnectionTRealType>,
                                 NetworkIOObjectT>(ex, net_io, hdr_pool);
 }
 
