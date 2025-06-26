@@ -25,7 +25,7 @@
 using namespace celaratcp;
 using namespace celaratcp::netio;
 
-template <typename addrType, typename TcpStackT>
+template <typename addrType>
 class Session : public TcpConnectionChan<addrType, std::shared_ptr<NetPacket> >
 {
 private:
@@ -46,12 +46,8 @@ private:
     for (;;) {
       auto pkt = this->tx_payload_pool_->allocate();
       auto buf = pkt->GetMutableBuf();
-      auto [ec, bytes] = co_await asio::async_read(this->udp_socket_, buf, asio::use_awaitable);
-#if 0
-      auto [ec, bytes] = co_await udp_socket.async_receive(
-          asio::buffer(buf),
-          asio::experimental::as_tuple(asio::use_awaitable));
-#endif
+      auto [ec, bytes] = co_await asio::async_read(this->udp_socket_, buf,
+                                                   asio::use_awaitable);
       if (!ec) {
         pkt->SetUsedBytes(bytes);
       }
@@ -71,39 +67,50 @@ private:
       FillPacketIpTcpHdr(TcpPacketType::ACK, hdr, pkt);
       std::list<asio::const_buffer> bufs
           = { hdr->GetConstBuf(), pkt->GetConstBuf() };
-      // TODO: ask the TcpStack sned it.
+      // TODO: ask the TcpStack send it.
     }
   }
 
 public:
-  Session(asio::io_context &ioc, const addrType &local_addr,
+#if 0
+  explicit Session(asio::io_context &ioc, const addrType &local_addr,
           uint_fast16_t local_port, const addrType &remote_addr,
-          uint_fast16_t remote_port, TcpStackT &tcp_stack, uint16_t udp_port)
+          uint_fast16_t remote_port, uint16_t udp_port)
       : TcpConnectionChan<addrType, std::shared_ptr<NetPacket> >(
             ioc, local_addr, local_port, remote_addr, remote_port),
-        ioc_(ioc), tcp_stack_(tcp_stack), chan_tx_(ioc, 32), udp_socket_(ioc)
+        ioc_(ioc), chan_tx_(ioc, 32), udp_socket_(ioc)
   {
+    tx_payload_pool_->reserve(20);
+  }
+#endif
+  explicit Session(const addrType &local_addr, uint_fast16_t local_port,
+                   const addrType &remote_addr, uint_fast16_t remote_port,
+                   asio::any_io_executor &ex)
+      : TcpConnectionChan<addrType, std::shared_ptr<NetPacket> >(
+            local_addr, local_port, remote_addr, remote_port, ex),
+        ex_(ex), chan_tx_(ex_, 32), udp_socket_(ex_)
+  {
+    tx_payload_pool_->reserve(20);
+  }
+
+  virtual void
+  Established() override
+  {
+#if 0
     asio::ip::udp::endpoint dest(asio::ip::address_v6::from_string("::1"),
                                  udp_port);
 
     udp_socket_.open(asio::ip::udp::v6());
     udp_socket_.connect(dest);
+#endif
 
-    tx_payload_pool_->reserve(20);
-  }
-
-  void
-  Established() override
-  {
-    asio::co_spawn(ioc_, tcp_receiver(), asio::detached);
-    asio::co_spawn(ioc_, udp_receiver(),
-                   asio::detached);
-    asio::co_spawn(ioc_, udp_forward_tcp(tx_hdr_pool_, chan_tx_));
+    asio::co_spawn(ex_, tcp_receiver(), asio::detached);
+    asio::co_spawn(ex_, udp_receiver(), asio::detached);
+    asio::co_spawn(ex_, udp_forward_tcp(tx_hdr_pool_, chan_tx_));
   }
 
 private:
-  asio::io_context &ioc_;
-  TcpStackT &tcp_stack_;
+  asio::any_io_executor &ex_;
 
   using pool_t = recycle::shared_pool<NetMemChunk>;
   std::shared_ptr<pool_t> tx_hdr_pool_;
@@ -218,10 +225,10 @@ main(int argc, char *argv[])
           [&hdr_alloc]() { return hdr_alloc.Allocation(); });
   hdr_pool->reserve(20);
 
-  auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4,
-                                     TcpConnectionChan<asio::ip::address_v4>,
-                                     TcpService<asio::ip::address_v4> >(
-      exec, netdev, hdr_pool);
+  auto tcp_stack
+      = MakeAsyncTcpStack<asio::ip::address_v4, Session<asio::ip::address_v4>,
+                          TcpService<asio::ip::address_v4> >(exec, netdev,
+                                                             hdr_pool);
 
   // TcpChanUdpService service(ioc, netdev, tcp_port, udp_port);
   // service.start();
