@@ -67,23 +67,31 @@ enum class TcpPacketType
   RST
 };
 
-template <typename AddrType>
+enum class CheckSumPolicy
+{
+  None,
+  IP,
+  TCP,
+  IP_TCP,
+};
+
+template <typename AddrType, CheckSumPolicy Policy = CheckSumPolicy::None>
 class TcpConnection
 {
-protected:
-  /* network bytes order, cache data */
-  const typename AddrType::bytes_type local_addr_ND_;
-  const uint_fast16_t local_port_ND_;
-
 public:
   TcpConnectionState state_;
   const AddrType remote_addr_;
   const uint_fast16_t remote_port_;
 
 protected:
-  typename AddrType::bytes_type remote_addr_ND_;
-  uint_fast16_t remote_port_ND_;
+  using IpHdrArray = std::array<
+      uint8_t, std::conditional_t<
+                   std::is_same_v<AddrType, asio::ip::address_v4>,
+                   std::integral_constant<std::size_t, kIpv4HdrSize>,
+                   std::integral_constant<std::size_t, kIpv6HdrSize> >::value>;
 
+  IpHdrArray ip_hdr_tmpl_;
+  std::array<uint8_t, kTcpHdrMinimalSize> tcp_hdr_tmpl_;
   // The outgoing sequence number
   uint32_t sequenceN;
   // The outgoing ACK number
@@ -97,30 +105,54 @@ protected:
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
       = 0>
+  static void
+  FillIpHdrTmpl(std::span<uint8_t> buf, AddrType::bytes_type local_addr_ND,
+                AddrType::bytes_type remote_addr_ND) noexcept
+  {
+    // Version and IHL
+    buf[0] = 0x45;
+    // DSCP and ECN
+    buf[1] = 0x00;
+    // Flags and Fragment Offset
+    buf[6] = 0x40;
+    // Protocol
+    buf[9] = IPPROTO_TCP;
+
+    // Source and destination addresses
+    std::copy(local_addr_ND.cbegin(), local_addr_ND.cend(),
+              buf.subspan(12).begin());
+    std::copy(remote_addr_ND.cbegin(), remote_addr_ND.cend(),
+              buf.subspan(16).begin());
+  }
+
+  template <
+      typename T = AddrType,
+      typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
+      = 0>
   bool
   ConstructIpHdr(NetPacket &hdr, const std::size_t payload_size = 0,
                  uint8_t ttl = 64) noexcept
   {
-    // Construct IPv4 header
-    auto data = hdr.GetData();
-    if (data.size() < kIpv4HdrSize) {
+    if (hdr.GetMaximumSize() < kIpv4HdrSize) {
       return false;
     }
 
-    data[0] = 0x45; // Version and IHL
-    data[1] = 0x00; // DSCP and ECN
-    *reinterpret_cast<uint16_t *>(data.data() + 2) = htons(
-        kIpv4HdrSize + kTcpHdrMinimalSize + payload_size); // Total Length
-    *reinterpret_cast<uint16_t *>(data.data() + 4) = 0;    // Identification
-    data[6] = 0x40;        // Flags and Fragment Offset
-    data[8] = ttl;         // TTL
-    data[9] = IPPROTO_TCP; // Protocol
-    // Source and destination addresses
-    std::copy(local_addr_ND_.begin(), local_addr_ND_.end(), data.data() + 12);
-    std::copy(remote_addr_ND_.begin(), remote_addr_ND_.end(),
-              data.data() + 16);
-    // clear checksum
-    *reinterpret_cast<uint16_t *>(data.data() + 10) = 0;
+    auto data = hdr.GetData();
+    std::copy(ip_hdr_tmpl_.begin(), ip_hdr_tmpl_.end(), data.begin());
+
+    // Total Length
+    *reinterpret_cast<uint16_t *>(data.data() + 2)
+        = htons(kIpv4HdrSize + kTcpHdrMinimalSize + payload_size);
+    // TTL
+    data[8] = ttl;
+
+    if constexpr (Policy == CheckSumPolicy::IP
+                  || Policy == CheckSumPolicy::IP_TCP)
+    {
+    } else {
+      // clear checksum
+      *reinterpret_cast<uint16_t *>(data.data() + 10) = 0;
+    }
 
     hdr.SetUsedBytes(kIpv4HdrSize);
     return true;
@@ -131,28 +163,51 @@ protected:
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
       = 0>
+  static void
+  FillIpHdrTmpl(std::span<uint8_t> buf, AddrType::bytes_type local_addr_ND,
+                AddrType::bytes_type remote_addr_ND) noexcept
+  {
+    // Version and Traffic Class
+    buf[0] = 0x60;
+#if 0
+    // Traffic Class and Flow Label
+    buf[1] = 0;
+    // Flow Label
+    buf[2] = 0;
+    // Flow Label
+    buf[3] = 0;
+    // Hop Limit
+    data[7] = 0;
+#endif
+    // Next Header
+    buf[6] = IPPROTO_TCP;
+    // Source and destination addresses
+    std::copy(local_addr_ND.cbegin(), local_addr_ND.cend(),
+              buf.subspan(8).begin());
+    std::copy(remote_addr_ND.cbegin(), remote_addr_ND.cend(),
+              buf.subspan(24).begin());
+  }
+
+  template <
+      typename T = AddrType,
+      typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
+      = 0>
   bool
   ConstructIpHdr(NetPacket &hdr, const std::size_t payload_size = 0,
                  uint8_t ttl = 64) noexcept
   {
     // Construct IPv6 header
-    auto data = hdr.GetData();
-    if (data.size() < kIpv6HdrSize) {
+    if (hdr.GetMaximumSize() < kIpv6HdrSize) {
       return false;
     }
+    auto data = hdr.GetData();
+    std::copy(ip_hdr_tmpl_.begin(), ip_hdr_tmpl_.end(), data.begin());
 
-    data[0] = 0x60; // Version and Traffic Class
-    data[1] = 0;    // Traffic Class and Flow Label
-    data[2] = 0;    // Flow Label
-    data[3] = 0;    // Flow Label
-    *reinterpret_cast<uint16_t *>(data.data() + 4) = htons(
-        kIpv6HdrSize + kTcpHdrMinimalSize + payload_size); // Payload Length
-    data[6] = IPPROTO_TCP;                                 // Next Header
-    data[7] = ttl;                                         // Hop Limit
-    // Source and destination addresses
-    std::copy(local_addr_ND_.begin(), local_addr_ND_.end(), data.data() + 8);
-    std::copy(remote_addr_ND_.begin(), remote_addr_ND_.end(),
-              data.data() + 24);
+    // Payload Length
+    *reinterpret_cast<uint16_t *>(data.data() + 4)
+        = htons(kIpv6HdrSize + kTcpHdrMinimalSize + payload_size);
+    // Hop Limit
+    data[7] = ttl;
 
     hdr.SetUsedBytes(kIpv6HdrSize);
     return true;
@@ -164,11 +219,29 @@ public:
 
   TcpConnection(const AddrType &local_addr, uint_fast16_t local_port,
                 const AddrType &remote_addr, uint_fast16_t remote_port)
-      : local_addr_ND_(local_addr.to_bytes()),
-        local_port_ND_(htons(local_port)), remote_addr_(remote_addr),
-        remote_port_(remote_port), remote_addr_ND_(remote_addr.to_bytes()),
-        remote_port_ND_(htons(remote_port)), sequenceN(0), ackN(0)
+      : remote_addr_(remote_addr), remote_port_(remote_port), ip_hdr_tmpl_{},
+        tcp_hdr_tmpl_{}, sequenceN(0), ackN(0)
   {
+    FillIpHdrTmpl(std::span<uint8_t>(ip_hdr_tmpl_), local_addr.to_bytes(),
+                  remote_addr.to_bytes());
+    uint16_t port_nd = htons(local_port);
+    auto data = tcp_hdr_tmpl_.data();
+    // Construct TCP header
+    *reinterpret_cast<uint16_t *>(data) = port_nd;
+    port_nd = htons(remote_port);
+    *reinterpret_cast<uint16_t *>(data + 2) = port_nd;
+
+    // Data offset + Rsrvd
+    data[12] = 0x50;
+
+    // Window size
+    *reinterpret_cast<uint16_t *>(data + 14) = htons(4000);
+#if 0
+    // Checksum
+    *reinterpret_cast<uint16_t *>(data + 16) = 0;
+    // Urgent pointer
+    *reinterpret_cast<uint16_t *>(data + 18) = 0;
+#endif
   }
 
   ~TcpConnection() = default;
@@ -246,26 +319,29 @@ public:
   FillPacketIpTcpHdr(TcpPacketType packetType, NetPacket &hdr,
                      std::shared_ptr<NetPacket> payload = nullptr)
   {
+    bool success = false;
     switch (packetType) {
     case TcpPacketType::ACK:
       if (payload) {
-        ConstructIpHdr(hdr, payload->GetUsedBytes());
+        success = ConstructIpHdr(hdr, payload->GetUsedBytes());
       } else {
-        ConstructIpHdr(hdr);
+        success = ConstructIpHdr(hdr);
       }
       break;
     default:
       if (payload) {
-        // TODO: drop payload
+        payload.reset();
       }
-      ConstructIpHdr(hdr);
+      success = ConstructIpHdr(hdr);
       break;
     }
 
-    auto data = hdr.GetData().data() + hdr.GetUsedBytes();
-    // Construct TCP header
-    *reinterpret_cast<uint16_t *>(data) = local_port_ND_;
-    *reinterpret_cast<uint16_t *>(data + 2) = remote_port_ND_;
+    if (!success)
+      throw std::logic_error("can't fill IP header");
+
+    auto tcp = hdr.GetData().subspan(hdr.GetUsedBytes());
+    std::copy(tcp_hdr_tmpl_.begin(), tcp_hdr_tmpl_.end(), tcp.begin());
+    auto data = tcp.data();
 
     uint32_t seq, ack;
     seq = hdr.meta.data[0];
@@ -274,11 +350,6 @@ public:
         = htonl(sequenceN + seq); // Sequence number
     *reinterpret_cast<uint32_t *>(data + 8)
         = htonl(ackN + ack); // Acknowledgment number
-    data[12] = 0x50;         // Data offset
-
-    *reinterpret_cast<uint16_t *>(data + 14) = htons(4000); // Window size
-    *reinterpret_cast<uint16_t *>(data + 16) = 0;           // Checksum
-    *reinterpret_cast<uint16_t *>(data + 18) = 0;           // Urgent pointer
 
     switch (packetType) {
     case TcpPacketType::SYN:
@@ -297,7 +368,6 @@ public:
       data[13] = 0x11; // Flags
       break;
     case TcpPacketType::RST:
-      data[12] = 0;    // RST should not have a payload
       data[13] = 0x04; // Flags (RST)
       break;
     default:
