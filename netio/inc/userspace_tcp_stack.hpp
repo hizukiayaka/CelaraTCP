@@ -67,7 +67,8 @@ enum class TcpPacketType
   RST
 };
 
-template <typename AddrType> class TcpConnection
+template <typename AddrType>
+class TcpConnection
 {
 protected:
   /* network bytes order, cache data */
@@ -89,90 +90,6 @@ protected:
   uint32_t ackN;
 
   std::chrono::time_point<std::chrono::steady_clock> last_activity_;
-
-public:
-  using TcpConnectionCtorArgs = std::tuple<const AddrType &, uint_fast16_t,
-                                           const AddrType &, uint_fast16_t>;
-
-  TcpConnection(const AddrType &local_addr, uint_fast16_t local_port,
-                const AddrType &remote_addr, uint_fast16_t remote_port)
-      : local_addr_ND_(local_addr.to_bytes()),
-        local_port_ND_(htons(local_port)), remote_addr_(remote_addr),
-        remote_port_(remote_port), remote_addr_ND_(remote_addr.to_bytes()),
-        remote_port_ND_(htons(remote_port)), sequenceN(0), ackN(0)
-  {
-  }
-
-  TcpConnection(AddrType remoteAddr, uint_fast16_t remotePort)
-      : remote_addr_(remoteAddr), remote_port_(remotePort), sequenceN(0),
-        ackN(0)
-  {
-    // will remove
-  }
-  ~TcpConnection() = default;
-
-  virtual void
-  UpdateRecvSeq(TcpPacketType type, uint32_t seq,
-                uint32_t payload_size = 0) noexcept
-  {
-    switch (type) {
-    case TcpPacketType::SYN:
-    case TcpPacketType::SYN_ACK:
-      if (payload_size == 0) {
-        payload_size = 1;
-      }
-      ackN = seq + payload_size;
-
-      break;
-    case TcpPacketType::ACK:
-      break;
-    default:
-      break;
-    }
-  }
-
-  virtual void
-  UpdateRecvAck(TcpPacketType type, uint32_t ack) noexcept
-  {
-    // do nothing
-  }
-
-  virtual void
-  UpdateSentSeq(TcpPacketType type, uint32_t seq = 0,
-                uint32_t payload_size = 0) noexcept
-  {
-    switch (type) {
-    case TcpPacketType::SYN:
-    case TcpPacketType::SYN_ACK:
-      if (payload_size == 0) {
-        payload_size = 1;
-      }
-      if (seq == 0) {
-        sequenceN += payload_size;
-      } else {
-        sequenceN = seq + payload_size;
-      }
-
-      break;
-    case TcpPacketType::ACK:
-      break;
-    default:
-      break;
-    }
-  }
-
-  virtual void
-  SetPacketMetaData(std::shared_ptr<NetPacket> packet, uint32_t seq,
-                    uint32_t ack)
-  {
-    packet->meta.data[0] = seq;
-    packet->meta.data[1] = ack;
-  }
-
-  virtual void Established() {};
-
-  TcpConnection(TcpConnection &&) = default;
-  TcpConnection &operator=(TcpConnection &&) = default;
 
 protected:
   // IPv4 specialization
@@ -242,6 +159,83 @@ protected:
   }
 
 public:
+  using TcpConnectionCtorArgs = std::tuple<const AddrType &, uint_fast16_t,
+                                           const AddrType &, uint_fast16_t>;
+
+  TcpConnection(const AddrType &local_addr, uint_fast16_t local_port,
+                const AddrType &remote_addr, uint_fast16_t remote_port)
+      : local_addr_ND_(local_addr.to_bytes()),
+        local_port_ND_(htons(local_port)), remote_addr_(remote_addr),
+        remote_port_(remote_port), remote_addr_ND_(remote_addr.to_bytes()),
+        remote_port_ND_(htons(remote_port)), sequenceN(0), ackN(0)
+  {
+  }
+
+  ~TcpConnection() = default;
+
+  virtual void
+  UpdateRecvSeq(TcpPacketType type, uint32_t seq,
+                uint32_t payload_size = 0) noexcept
+  {
+    switch (type) {
+    case TcpPacketType::SYN:
+    case TcpPacketType::SYN_ACK:
+      if (payload_size == 0) {
+        payload_size = 1;
+      }
+      ackN = seq + payload_size;
+
+      break;
+    case TcpPacketType::ACK:
+      break;
+    default:
+      break;
+    }
+  }
+
+  virtual void
+  UpdateRecvAck(TcpPacketType type, uint32_t ack) noexcept
+  {
+    // do nothing
+  }
+
+  virtual void
+  UpdateSentSeq(TcpPacketType type, uint32_t seq = 0,
+                uint32_t payload_size = 0) noexcept
+  {
+    switch (type) {
+    case TcpPacketType::SYN:
+    case TcpPacketType::SYN_ACK:
+      if (payload_size == 0) {
+        payload_size = 1;
+      }
+      if (seq == 0) {
+        sequenceN += payload_size;
+      } else {
+        sequenceN = seq + payload_size;
+      }
+
+      break;
+    case TcpPacketType::ACK:
+      break;
+    default:
+      break;
+    }
+  }
+
+  virtual void
+  SetPacketMetaData(std::shared_ptr<NetPacket> packet, uint32_t seq,
+                    uint32_t ack)
+  {
+    packet->meta.data[0] = seq;
+    packet->meta.data[1] = ack;
+  }
+
+  virtual void Established() {};
+
+  TcpConnection(TcpConnection &&) = default;
+  TcpConnection &operator=(TcpConnection &&) = default;
+
   void
   FreshActivity()
   {
@@ -313,8 +307,10 @@ public:
     hdr.SetUsedBytes(hdr.GetUsedBytes() + kTcpHdrMinimalSize);
   }
 
-  template <typename, typename> friend class TcpService;
-  template <typename, typename, typename> friend class UserspaceTcpStack;
+  template <typename, typename>
+  friend class TcpService;
+  template <typename, typename, typename>
+  friend class UserspaceTcpStack;
 };
 
 template <typename AddrType, typename TcpConnectionT>
@@ -327,7 +323,7 @@ public:
 
   static TcpConnectionT
   Create(AddrType local_addr, uint_fast16_t local_port, AddrType remote_addr,
-       uint_fast16_t remote_port)
+         uint_fast16_t remote_port)
   {
     return FactoryFunction{}(local_addr, local_port, remote_addr, remote_port);
   }
@@ -449,7 +445,8 @@ protected:
   AddrType local_addr_;
 
 private:
-  template <typename CharIterator> class Uint16Iterator
+  template <typename CharIterator>
+  class Uint16Iterator
   {
   public:
     using iterator_category = std::forward_iterator_tag;
@@ -560,10 +557,10 @@ protected:
     return { true, ipHeaderLength };
   }
 
-public:
   UserspaceTcpStack() {}
   ~UserspaceTcpStack() = default;
 
+public:
   void
   SetLocalAddress(const AddrType &addr)
   {

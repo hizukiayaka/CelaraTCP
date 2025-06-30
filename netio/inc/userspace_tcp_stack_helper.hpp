@@ -88,8 +88,8 @@ requires
     : public UserspaceTcpStack<AddrType, TcpConnectionT, TcpServiceT>
 {
 protected:
-  asio::any_io_executor &executor_;
-  NetworkIOObjectT &nout_;
+  asio::any_io_executor executor_;
+  std::shared_ptr<NetworkIOObjectT> nout_;
   shared_netbuf_pool_t hdr_pool_;
 
   // Wrapper coroutine for sending packets downstream
@@ -97,15 +97,15 @@ protected:
   asio::awaitable<std::size_t>
   tx_callback_(ConstBufferSequence &bufs)
   {
-    co_return co_await asio::async_write(nout_, bufs, asio::use_awaitable);
+    co_return co_await asio::async_write(*nout_, bufs, asio::use_awaitable);
   }
 
 public:
-  // Accept executor by value (copy/move), not by reference_wrapper
-  AsyncUserspaceTcpStack(asio::any_io_executor &ex, NetworkIOObjectT &net_io,
+  AsyncUserspaceTcpStack(asio::any_io_executor &&ex,
+                         std::shared_ptr<NetworkIOObjectT> net_io,
                          shared_netbuf_pool_t hdr_pool)
       : UserspaceTcpStack<AddrType, TcpConnectionT, TcpServiceT>(),
-        executor_(ex), nout_(net_io), hdr_pool_(hdr_pool)
+        executor_(std::move(ex)), nout_(std::move(net_io)), hdr_pool_(hdr_pool)
   {
   }
   ~AsyncUserspaceTcpStack() = default;
@@ -314,7 +314,8 @@ public:
 template <typename AddrType, typename NetworkIOObjectT,
           typename FactoryFunction>
 auto
-MakeAsyncTcpStack(asio::any_io_executor &ex, NetworkIOObjectT &net_io,
+MakeAsyncTcpStack(asio::any_io_executor &&ex,
+                  std::shared_ptr<NetworkIOObjectT> net_io,
                   shared_netbuf_pool_t hdr_pool, FactoryFunction factory)
 {
 
@@ -324,7 +325,8 @@ MakeAsyncTcpStack(asio::any_io_executor &ex, NetworkIOObjectT &net_io,
 
   return AsyncUserspaceTcpStack<AddrType, TcpConnectionTRealType,
                                 TcpService<AddrType, TcpConnectionTRealType>,
-                                NetworkIOObjectT>(ex, net_io, hdr_pool);
+                                NetworkIOObjectT>(std::move(ex),
+                                                  std::move(net_io), hdr_pool);
 }
 
 } // namespace netio
