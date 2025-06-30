@@ -75,12 +75,28 @@ int main1(int argc, char *argv[])
 #endif
 
 asio::awaitable<void>
+work(std::shared_ptr<recycle::shared_pool<NetMemChunk> > pool, auto stream,
+     auto &tcp_stack)
+{
+  auto pkt = pool->allocate();
+  auto buf = pkt->GetMutableBuf();
+
+  auto bytes = co_await asio::async_read(*stream, buf, asio::use_awaitable);
+  pkt->SetUsedBytes(bytes);
+  std::vector<std::shared_ptr<celaratcp::NetPacket> > pkts = { pkt };
+
+  co_await tcp_stack.ProcessIncomingPackets(pkts);
+}
+
+void
 run2()
 {
-  auto executor = co_await asio::this_coro::executor;
+  asio::io_context ioc;
 
   asio::ip::network_v4 net1(asio::ip::make_address_v4("169.254.3.1"), 32);
-  asio::posix::stream_descriptor stream(executor);
+
+  asio::any_io_executor ex = ioc.get_executor();
+  auto stream = std::make_shared<asio::posix::stream_descriptor>(ex);
 
   memmanager::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
   auto hdr_pool = std::make_shared<recycle::shared_pool<NetMemChunk> >(
@@ -88,28 +104,28 @@ run2()
 
   hdr_pool->reserve(20);
 
-  auto conn_factory = [&executor](const asio::ip::address_v4 &local_addr,
-                                 uint_fast16_t local_port,
-                                 const asio::ip::address_v4 &remote_addr,
-                                 uint_fast16_t remote_port) {
-    return netio::TcpConnectionChan<asio::ip::address_v4>(
-        local_addr, local_port, remote_addr, remote_port, executor);
+  auto conn_factory = [&ex]<typename AddrType>(const AddrType &local_addr,
+                                               uint_fast16_t local_port,
+                                               const AddrType &remote_addr,
+                                               uint_fast16_t remote_port) {
+    return netio::TcpConnectionChan<AddrType>(local_addr, local_port,
+                                              remote_addr, remote_port, ex);
   };
 
-  auto tcpStack = netio::MakeAsyncTcpStack<asio::ip::address_v4>(
-      executor, stream, hdr_pool, conn_factory);
-  tcpStack.SetLocalAddress(net1.address());
-  tcpStack.AddSimpleService(5162);
+  auto tcp_stack = netio::MakeAsyncTcpStack<asio::ip::address_v4>(
+      std::move(ex), stream, hdr_pool, conn_factory);
+  tcp_stack.SetLocalAddress(net1.address());
+  tcp_stack.AddSimpleService(5162);
+
+  asio::co_spawn(ioc, work(hdr_pool, stream, tcp_stack), asio::detached);
+
+  ioc.run();
 }
 
 int
 main(int argc, char *argv[])
 {
-  asio::io_context ioc;
-
-  asio::co_spawn(ioc, run2(), asio::detached);
-
-  ioc.run();
+  run2();
 
   return 0;
 }
