@@ -27,6 +27,7 @@
 #include <numeric>
 #include <optional>
 
+#include "internet_checksum.hpp"
 #include "net_packet.hpp"
 
 namespace celaratcp {
@@ -84,6 +85,23 @@ public:
   const uint_fast16_t remote_port_;
 
 protected:
+  // We can use std::byteswap() from c++23
+  constexpr static uint16_t kTcpWindowNetworkOrder = [] {
+    constexpr uint16_t kTcpWindowSize = 4000;
+    if constexpr (std::endian::native == std::endian::little) {
+      // Convert to big-endian (network byte order) if the platform is
+      // little-endian
+      return static_cast<uint16_t>((kTcpWindowSize >> 8)
+                                   | (kTcpWindowSize << 8));
+    } else {
+      // Already in big-endian, no conversion needed
+      return kTcpWindowSize;
+    }
+  }();
+
+  // Data offset + Rsrvd
+  constexpr static uint8_t kTcpDOffsetRsrvd = 0x50;
+
   using IpHdrArray = std::array<
       uint8_t, std::conditional_t<
                    std::is_same_v<AddrType, asio::ip::address_v4>,
@@ -99,15 +117,38 @@ protected:
 
   std::chrono::time_point<std::chrono::steady_clock> last_activity_;
 
+  uint_fast32_t addr_sum_for_checksum_;
+  uint_fast32_t partial_sum_for_checksum_;
+
 protected:
+  static uint_fast32_t
+  SrcDstAddrInternetSum(AddrType::bytes_type &l_addr_nd,
+                        AddrType::bytes_type &r_addr_nd)
+  {
+    uint_fast32_t addr_sum = InternetSum(l_addr_nd);
+    addr_sum += InternetSum(r_addr_nd);
+
+    return addr_sum;
+  }
+
+  static uint_fast32_t
+  TcpSegPartialSum(uint_fast16_t lport_ND, uint_fast16_t rport_ND)
+  {
+    uint_fast32_t sum = lport_ND + rport_ND;
+    sum += (kTcpDOffsetRsrvd << 8);
+    sum += kTcpWindowNetworkOrder;
+
+    return sum;
+  }
+
   // IPv4 specialization
   template <
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
       = 0>
   static void
-  FillIpHdrTmpl(std::span<uint8_t> buf, AddrType::bytes_type local_addr_ND,
-                AddrType::bytes_type remote_addr_ND) noexcept
+  FillIpHdrTmpl(std::span<uint8_t> buf, AddrType::bytes_type &local_addr_ND,
+                AddrType::bytes_type &remote_addr_ND) noexcept
   {
     // Version and IHL
     buf[0] = 0x45;
@@ -149,6 +190,8 @@ protected:
     if constexpr (Policy == CheckSumPolicy::IP
                   || Policy == CheckSumPolicy::IP_TCP)
     {
+      static_assert(
+          false, "I don't think any one need this, I have not implement it");
     } else {
       // clear checksum
       *reinterpret_cast<uint16_t *>(data.data() + 10) = 0;
@@ -158,14 +201,27 @@ protected:
     return true;
   }
 
+  template <
+      typename T = AddrType,
+      typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
+      = 0>
+  static uint_fast32_t
+  TcpPseudoPartialSum(uint_fast32_t addr_sum)
+  {
+    uint_fast32_t sum = IPPROTO_TCP;
+    sum += addr_sum;
+    // Partial not included Tcp Segment length
+    return sum;
+  }
+
   // IPv6 specialization
   template <
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
       = 0>
   static void
-  FillIpHdrTmpl(std::span<uint8_t> buf, AddrType::bytes_type local_addr_ND,
-                AddrType::bytes_type remote_addr_ND) noexcept
+  FillIpHdrTmpl(std::span<uint8_t> buf, AddrType::bytes_type &local_addr_ND,
+                AddrType::bytes_type &remote_addr_ND) noexcept
   {
     // Version and Traffic Class
     buf[0] = 0x60;
@@ -213,6 +269,21 @@ protected:
     return true;
   }
 
+  template <
+      typename T = AddrType,
+      typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
+      = 0>
+  static uint_fast32_t
+  TcpPseudoPartialSum(uint_fast32_t addr_sum)
+  {
+    // https://www.ietf.org/rfc/rfc2460.txt
+    // 8.1 Upper-Layer Checksums
+    uint_fast32_t sum = IPPROTO_TCP << 8;
+    sum += addr_sum;
+    // Partial not included Tcp Segment length
+    return sum;
+  }
+
 public:
   using TcpConnectionCtorArgs = std::tuple<const AddrType &, uint_fast16_t,
                                            const AddrType &, uint_fast16_t>;
@@ -220,28 +291,37 @@ public:
   TcpConnection(const AddrType &local_addr, uint_fast16_t local_port,
                 const AddrType &remote_addr, uint_fast16_t remote_port)
       : remote_addr_(remote_addr), remote_port_(remote_port), ip_hdr_tmpl_{},
-        tcp_hdr_tmpl_{}, sequenceN(0), ackN(0)
+        tcp_hdr_tmpl_{}, sequenceN(0), ackN(0), addr_sum_for_checksum_(0),
+        partial_sum_for_checksum_(0)
   {
-    FillIpHdrTmpl(std::span<uint8_t>(ip_hdr_tmpl_), local_addr.to_bytes(),
-                  remote_addr.to_bytes());
-    uint16_t port_nd = htons(local_port);
+    typename AddrType::bytes_type l_addr_nd{ local_addr.to_bytes() };
+    typename AddrType::bytes_type r_addr_nd{ remote_addr.to_bytes() };
+
+    FillIpHdrTmpl(std::span<uint8_t>(ip_hdr_tmpl_), l_addr_nd, r_addr_nd);
+
+    uint16_t lport_nd = htons(local_port);
     auto data = tcp_hdr_tmpl_.data();
     // Construct TCP header
-    *reinterpret_cast<uint16_t *>(data) = port_nd;
-    port_nd = htons(remote_port);
-    *reinterpret_cast<uint16_t *>(data + 2) = port_nd;
+    *reinterpret_cast<uint16_t *>(data) = lport_nd;
+    uint16_t rport_nd = htons(remote_port);
+    *reinterpret_cast<uint16_t *>(data + 2) = rport_nd;
 
     // Data offset + Rsrvd
-    data[12] = 0x50;
+    data[12] = kTcpDOffsetRsrvd;
 
     // Window size
-    *reinterpret_cast<uint16_t *>(data + 14) = htons(4000);
+    *reinterpret_cast<uint16_t *>(data + 14) = kTcpWindowNetworkOrder;
 #if 0
     // Checksum
     *reinterpret_cast<uint16_t *>(data + 16) = 0;
     // Urgent pointer
     *reinterpret_cast<uint16_t *>(data + 18) = 0;
 #endif
+    if constexpr (Policy != CheckSumPolicy::None) {
+      addr_sum_for_checksum_ = SrcDstAddrInternetSum(l_addr_nd, r_addr_nd);
+      partial_sum_for_checksum_ = TcpPseudoPartialSum(addr_sum_for_checksum_);
+      partial_sum_for_checksum_ += TcpSegPartialSum(lport_nd, rport_nd);
+    }
   }
 
   ~TcpConnection() = default;
@@ -340,6 +420,8 @@ public:
     if (!success)
       throw std::logic_error("can't fill IP header");
 
+    auto ip_hdr_size = hdr.GetUsedBytes();
+
     auto tcp = hdr.GetData().subspan(hdr.GetUsedBytes());
     std::copy(tcp_hdr_tmpl_.begin(), tcp_hdr_tmpl_.end(), tcp.begin());
     auto data = tcp.data();
@@ -347,10 +429,12 @@ public:
     uint32_t seq, ack;
     seq = hdr.meta.data[0];
     ack = hdr.meta.data[1];
-    *reinterpret_cast<uint32_t *>(data + 4)
-        = htonl(sequenceN + seq); // Sequence number
-    *reinterpret_cast<uint32_t *>(data + 8)
-        = htonl(ackN + ack); // Acknowledgment number
+    // Sequence number
+    seq += sequenceN;
+    *reinterpret_cast<uint32_t *>(data + 4) = htonl(seq);
+    // Acknowledgment number
+    ack += ackN;
+    *reinterpret_cast<uint32_t *>(data + 8) = htonl(ack);
 
     switch (packetType) {
     case TcpPacketType::SYN:
@@ -375,7 +459,29 @@ public:
       throw std::invalid_argument("Invalid TcpPacketType");
     }
 
-    hdr.SetUsedBytes(hdr.GetUsedBytes() + kTcpHdrMinimalSize);
+    if constexpr (Policy != CheckSumPolicy::None) {
+      uint32_t tcp_sum = partial_sum_for_checksum_;
+      // FIXME: Pseudo header part Upper layer length
+      // tcp_sum += (kTcpHdrMinimalSize + payload_size)
+
+      // NOTE: the left Tcp Segment part here
+      tcp_sum += htonl(seq);
+      tcp_sum += htonl(ack);
+      tcp_sum += data[13];
+
+      if (payload) {
+        auto tcp_checksum = InternetChecksum(payload->GetData(), tcp_sum);
+        *reinterpret_cast<uint16_t *>(data + 16) = tcp_checksum;
+      } else {
+        while (tcp_sum > UINT16_MAX) {
+          tcp_sum = (tcp_sum & UINT16_MAX) + (tcp_sum >> 16);
+        }
+        *reinterpret_cast<uint16_t *>(data + 16)
+            = static_cast<uint16_t>(~tcp_sum);
+      }
+    }
+
+    hdr.SetUsedBytes(ip_hdr_size + kTcpHdrMinimalSize);
   }
 
   template <typename, typename>
