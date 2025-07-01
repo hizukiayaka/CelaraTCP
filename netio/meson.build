@@ -14,4 +14,13 @@ netio_psocket_dep = declare_dependency(link_with: netio_psocket,
     dependencies: [netdev_dep, spdlog_dep]
 )
 
+netio_raw = library('netio-raw',
+    'src/raw_ip_socket.cpp',
+    include_directories: [netio_inc, common_inc]
+)
+
+netio_raw_dep = declare_dependency(link_with: netio_raw,
+    include_directories: [netio_inc]
+)
+
 subdir('tests')
