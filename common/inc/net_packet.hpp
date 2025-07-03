@@ -58,23 +58,31 @@ public:
 
 // Concept for containers holding items derived from NetPacket
 template <typename T>
-concept NetPacketContainer =
-    // Case 1: T is a container with a value_type derived from NetPacket
-    (requires {
-      typename std::remove_reference_t<T>::value_type;
-      requires std::is_base_of_v<
-          NetPacket,
-          typename std::pointer_traits<
-              typename std::remove_reference_t<T>::value_type>::element_type>;
-    })
-    ||
-    // Case 2: T is a smart pointer to a type derived from NetPacket
-    (requires {
-      requires std::is_base_of_v<
-          NetPacket, typename std::pointer_traits<T>::element_type>;
-    });
+concept NetPacketContainer = requires(T t)
+{
+  typename T::value_type;
+  typename T::iterator;
+  t.begin();
+  t.end();
+}
+&&(requires {
+  typename std::remove_reference_t<T>::value_type;
+  requires std::is_base_of_v<
+      NetPacket, typename std::pointer_traits<typename std::remove_reference_t<
+                     T>::value_type>::element_type>;
+});
 
-template <std::size_t... Ns> class NetPacketSW : public NetPacket
+template <typename T>
+concept NetPacketWrapper
+    = NetPacketContainer<T> ||
+      // Case 2: T is a smart pointer to a type derived from NetPacket
+      (requires {
+        requires std::is_base_of_v<
+            NetPacket, typename std::pointer_traits<T>::element_type>;
+      });
+
+template <std::size_t... Ns>
+class NetPacketSW : public NetPacket
 {
 private:
   static constexpr std::size_t kTotalSize = (Ns + ...);
