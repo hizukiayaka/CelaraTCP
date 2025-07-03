@@ -6,7 +6,7 @@
 #ifndef USERSPACE_TCP_STACK_HELPER_HPP_
 #define USERSPACE_TCP_STACK_HELPER_HPP_
 
-#include <asio/experimental/channel.hpp>
+#include <asio/experimental/concurrent_channel.hpp>
 #include <recycle/shared_pool.hpp>
 #include <utility>
 
@@ -15,14 +15,23 @@
 namespace celaratcp {
 namespace netio {
 
-template <typename AddrType, NetPacketContainer PacketContainer
+template <typename AddrType, NetPacketWrapper PacketContainer
                              = std::vector<std::shared_ptr<NetPacket> > >
 class TcpConnectionChan : public TcpConnection<AddrType>
 {
 public:
   // Use asio::experimental::channel_traits<asio::any_io_executor> for
   // compatibility
-  using ChannelType = asio::experimental::channel<void(PacketContainer &&)>;
+  using ChannelType
+      = asio::experimental::concurrent_channel<void(PacketContainer &&)>;
+
+  using PayloadWrapType = PacketContainer;
+
+  static constexpr bool
+  IsNetPacketContainer()
+  {
+    return NetPacketContainer<PacketContainer>;
+  }
 
 #if 0
   using typename TcpConnection<AddrType>::TcpConnectionCtorArgs;
@@ -54,7 +63,7 @@ public:
   void
   submitRxChann(PacketContainer &&packets)
   {
-    rx_chan_.async_send(std::move(packets), asio::use_awaitable);
+    rx_chan_.async_send(std::move(packets), [](std::error_code) {});
   }
 
   asio::awaitable<PacketContainer>
@@ -95,9 +104,10 @@ protected:
   // Wrapper coroutine for sending packets downstream
   template <typename ConstBufferSequence>
   asio::awaitable<std::size_t>
-  tx_callback_(ConstBufferSequence &bufs)
+  tx_callback_(ConstBufferSequence &&bufs)
   {
-    co_return co_await asio::async_write(*nout_, bufs, asio::use_awaitable);
+    co_return co_await asio::async_write(*nout_, std::move(bufs),
+                                         asio::use_awaitable);
   }
 
 public:
@@ -108,6 +118,7 @@ public:
         executor_(std::move(ex)), nout_(std::move(net_io)), hdr_pool_(hdr_pool)
   {
   }
+
   ~AsyncUserspaceTcpStack() = default;
 
   template <typename NetPacket>
@@ -142,7 +153,7 @@ public:
     return true;
   }
 
-  template <NetPacketContainer PacketContainer>
+  template <NetPacketWrapper PacketContainer>
   asio::awaitable<TcpStackState>
   ProcessIncomingPackets(PacketContainer &packets)
   {
@@ -164,11 +175,11 @@ public:
       co_return TcpStackState::ERR_WRONG_PROTOCOL;
     }
 
-    std::size_t payloadOffset = ip_payload_offset + kTcpHdrMinimalSize;
-    if (total_bytes_used < payloadOffset) {
+    std::size_t payload_offset = ip_payload_offset + kTcpHdrMinimalSize;
+    if (total_bytes_used < payload_offset) {
       co_return TcpStackState::ERR_WRONG_PROTOCOL;
     }
-    if (packet->GetUsedBytes() < payloadOffset) {
+    if (packet->GetUsedBytes() < payload_offset) {
       co_return TcpStackState::ERR_WRONG_PROTOCOL;
     }
     /* safely packet checking */
@@ -202,9 +213,8 @@ public:
 
           auto reply = hdr_pool_->allocate();
           conn.FillPacketIpTcpHdr(TcpPacketType::ACK, *reply);
-          std::list<asio::const_buffer> r = { reply->GetConstBuf() };
 
-          auto ret = co_await tx_callback_(r);
+          auto ret = co_await tx_callback_(std::move(reply->GetConstBuf()));
           if (ret >= reply->GetUsedBytes()) {
             conn.UpdateSentSeq(TcpPacketType::ACK, 0, 1);
 
@@ -258,20 +268,38 @@ public:
 
         auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
 
-        auto payloadSize = total_bytes_used - payloadOffset;
-        if (payloadSize) {
-          // TODO: process the case partial payload in header packet
-          PacketContainer payloadPackets;
-          auto pit = packets.begin();
+        auto payload_size = total_bytes_used - payload_offset;
+        if (payload_size) {
+          constexpr bool kAcceptedPackets
+              = TcpConnectionT::IsNetPacketContainer();
 
-          if (pit != packets.end())
-            ++pit; // skip header
-          conn.SetPacketMetaData(*pit, seqNum, ackNum);
-          for (; pit != packets.end(); ++pit) {
-            payloadPackets.push_back(*pit);
+          if constexpr (!kAcceptedPackets) {
+            static_assert(
+                std::is_same_v<typename TcpConnectionT::PayloadWrapType,
+                               typename std::remove_reference_t<
+                                   PacketContainer>::value_type>,
+                "mismatch type for payload packet");
           }
 
-          conn.UpdateRecvSeq(TcpPacketType::ACK, seqNum, payloadSize);
+          typename TcpConnectionT::PayloadWrapType payloadPackets;
+
+          // TODO: process the case partial payload in header packet
+          auto pit = packets.begin();
+          if (pit != packets.end())
+            ++pit; // skip header
+
+          if constexpr (kAcceptedPackets) {
+            for (; pit != packets.end(); ++pit) {
+              payloadPackets.push_back(*pit);
+            }
+          } else {
+            if (payload_size > (*pit)->GetUsedBytes())
+              throw std::logic_error("We would lose payload here");
+
+            payloadPackets.swap(*pit);
+          }
+
+          conn.UpdateRecvSeq(TcpPacketType::ACK, seqNum, payload_size);
           conn.submitRxChann(std::move(payloadPackets));
         } else {
           conn.UpdateRecvSeq(TcpPacketType::ACK, seqNum);
@@ -283,9 +311,15 @@ public:
       }
     } else if (tcpFlags == 0x02) {
       // SYN
+      auto conn_op = service->GetConnection(src_addr, src_port);
+      if (conn_op) {
+        [[maybe_unused]] auto &conn = conn_op->get();
+
+        // TODO: reset existed connection
+        co_return TcpStackState::SUCCESS;
+      }
       auto conn = TcpConnectionT(service->GetLocalAddr(), service->GetPort(),
                                  src_addr, src_port, executor_);
-      // TODO: check if the connection already exists, if it does, reset it
 
       conn.state_ = TcpConnectionState::SYN_RECEIVED;
       auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
@@ -293,15 +327,15 @@ public:
 
       auto reply = hdr_pool_->allocate();
       conn.FillPacketIpTcpHdr(TcpPacketType::SYN_ACK, *reply);
-      std::forward_list<asio::const_buffer> r = { reply->GetConstBuf() };
-      auto ret = co_await tx_callback_(r);
+
+      auto ret = co_await tx_callback_(std::move(reply->GetConstBuf()));
       if (ret >= reply->GetUsedBytes()) {
         seqNum = this->InitialConnSeq(service->GetLocalAddr(),
                                       service->GetPort(), src_addr, src_port);
         conn.UpdateSentSeq(TcpPacketType::SYN_ACK, seqNum, 1);
         conn.FreshActivity();
 
-        service->AddConnection(std::move(conn));
+        service->AddConnection(std::move(conn), false);
         co_return TcpStackState::SUCCESS;
       }
       co_return TcpStackState::DROP;

@@ -267,7 +267,8 @@ public:
   }
 
   virtual void
-  UpdateRecvAck(TcpPacketType type, uint32_t ack) noexcept
+  UpdateRecvAck([[maybe_unused]] TcpPacketType type,
+                [[maybe_unused]] uint32_t ack) noexcept
   {
     // do nothing
   }
@@ -415,38 +416,43 @@ protected:
 public:
   using TcpServiceCtorArgs = std::tuple<AddrType &, uint_fast16_t>;
 
-  TcpService(AddrType &addr, uint_fast16_t port)
-      : local_addr_(addr), port_(port)
+  TcpService(AddrType &addr, uint_fast16_t port) noexcept : local_addr_(addr),
+                                                            port_(port)
   {
   }
   ~TcpService() = default;
 
   uint_fast16_t
-  GetPort() const
+  GetPort() const noexcept
   {
     return port_;
   }
 
   const AddrType &
-  GetLocalAddr() const
+  GetLocalAddr() const noexcept
   {
     return local_addr_;
   }
 
   virtual bool
-  AddConnection(TcpConnectionT &&conn)
+  AddConnection(TcpConnectionT &&conn, bool check_duplicate = true)
   {
-    auto it
-        = std::find_if(connections_list_.cbegin(), connections_list_.cend(),
-                       [&](const TcpConnectionT &c) {
-                         return c.remote_addr_ == conn.remote_addr_
-                                && c.remote_port_ == conn.remote_port_;
-                       });
-    if (it == connections_list_.end()) {
+    if (check_duplicate) {
+      auto it
+          = std::find_if(connections_list_.cbegin(), connections_list_.cend(),
+                         [&](const TcpConnectionT &c) {
+                           return c.remote_addr_ == conn.remote_addr_
+                                  && c.remote_port_ == conn.remote_port_;
+                         });
+      if (it == connections_list_.end()) {
+        connections_list_.push_front(std::move(conn));
+        return true;
+      }
+      return false;
+    } else {
       connections_list_.push_front(std::move(conn));
       return true;
     }
-    return false;
   }
 
   virtual bool
@@ -480,7 +486,7 @@ public:
   }
 
   virtual std::optional<std::reference_wrapper<TcpConnectionT> >
-  GetConnection(AddrType remoteAddr, uint_fast16_t remotePort)
+  GetConnection(AddrType &remoteAddr, uint_fast16_t remotePort)
   {
     auto it = std::find_if(connections_list_.begin(), connections_list_.end(),
                            [&](const TcpConnectionT &conn) {
@@ -702,8 +708,10 @@ public:
   }
 
   virtual uint32_t
-  InitialConnSeq(const AddrType &localAddr, const uint_fast16_t localPort,
-                 const AddrType &remoteAddr, const uint_fast16_t remotePort)
+  InitialConnSeq([[maybe_unused]] const AddrType &localAddr,
+                 [[maybe_unused]] const uint_fast16_t localPort,
+                 [[maybe_unused]] const AddrType &remoteAddr,
+                 [[maybe_unused]] const uint_fast16_t remotePort)
   {
     return 0;
   }
