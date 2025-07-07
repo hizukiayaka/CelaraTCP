@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -290,8 +291,9 @@ public:
 
   TcpConnection(const AddrType &local_addr, uint_fast16_t local_port,
                 const AddrType &remote_addr, uint_fast16_t remote_port)
-      : remote_addr_(remote_addr), remote_port_(remote_port), ip_hdr_tmpl_{},
-        tcp_hdr_tmpl_{}, sequenceN(0), ackN(0), addr_sum_for_checksum_(0),
+      : state_(TcpConnectionState::LISTEN), remote_addr_(remote_addr),
+        remote_port_(remote_port), ip_hdr_tmpl_{}, tcp_hdr_tmpl_{},
+        sequenceN(0), ackN(0), addr_sum_for_checksum_(0),
         partial_sum_for_checksum_(0)
   {
     typename AddrType::bytes_type l_addr_nd{ local_addr.to_bytes() };
@@ -483,47 +485,38 @@ public:
 
     hdr.SetUsedBytes(ip_hdr_size + kTcpHdrMinimalSize);
   }
-
-  template <typename, typename>
-  friend class TcpService;
-  template <typename, typename, typename>
-  friend class UserspaceTcpStack;
 };
 
-template <typename AddrType, typename TcpConnectionT>
-class TcpConnectionTFactory
+template <typename Factory, typename AddrType>
+concept FactoryForTcpConnect = requires(Factory f, AddrType a, uint_fast16_t p,
+                                        AddrType b, uint_fast16_t q)
 {
-public:
-  using FactoryFunction = std::function<TcpConnectionT(
-      AddrType local_addr, uint_fast16_t local_port, AddrType remote_addr,
-      uint_fast16_t remote_port)>;
+  { f(a, p, b, q) };
+}
+&&std::is_constructible_v<TcpConnection<AddrType>, AddrType, uint_fast16_t,
+                          AddrType, uint_fast16_t>;
 
-  static TcpConnectionT
-  Create(AddrType local_addr, uint_fast16_t local_port, AddrType remote_addr,
-         uint_fast16_t remote_port)
-  {
-    return FactoryFunction{}(local_addr, local_port, remote_addr, remote_port);
-  }
-
-  using ConnectionType = decltype(std::declval<FactoryFunction>()(
-      std::declval<AddrType>(), std::declval<uint_fast16_t>(),
-      std::declval<AddrType>(), std::declval<uint_fast16_t>()));
-};
-
-template <typename AddrType,
-          typename TcpConnectionT = TcpConnection<AddrType> >
+template <typename AddrType, typename TcpConnFactory>
+// requires FactoryForTcpConnect<TcpConnFactory, AddrType>
 class TcpService
 {
 protected:
   AddrType local_addr_;
   uint_fast16_t port_;
-  std::forward_list<TcpConnectionT> connections_list_;
+  TcpConnFactory conn_factory_;
+
+  using TcpConnectionT
+      = std::invoke_result_t<decltype(conn_factory_), AddrType, uint_fast16_t,
+                             AddrType, uint_fast16_t>;
+
+  std::forward_list<std::shared_ptr<TcpConnectionT> > connections_list_;
 
 public:
-  using TcpServiceCtorArgs = std::tuple<AddrType &, uint_fast16_t>;
-
-  TcpService(AddrType &addr, uint_fast16_t port) noexcept : local_addr_(addr),
-                                                            port_(port)
+  TcpService(TcpConnFactory &&conn_factory, const AddrType &addr,
+             uint_fast16_t port) noexcept
+      : local_addr_(addr),
+        port_(port),
+        conn_factory_(std::move(conn_factory))
   {
   }
   ~TcpService() = default;
@@ -540,24 +533,22 @@ public:
     return local_addr_;
   }
 
-  virtual bool
-  AddConnection(TcpConnectionT &&conn, bool check_duplicate = true)
+  virtual std::shared_ptr<TcpConnectionT>
+  AddConnection(AddrType &remote_addr, uint_fast16_t remote_port)
   {
-    if (check_duplicate) {
-      auto it
-          = std::find_if(connections_list_.cbegin(), connections_list_.cend(),
-                         [&](const TcpConnectionT &c) {
-                           return c.remote_addr_ == conn.remote_addr_
-                                  && c.remote_port_ == conn.remote_port_;
-                         });
-      if (it == connections_list_.end()) {
-        connections_list_.push_front(std::move(conn));
-        return true;
-      }
-      return false;
+    auto it
+        = std::find_if(connections_list_.cbegin(), connections_list_.cend(),
+                       [&](const std::shared_ptr<TcpConnectionT> &c) {
+                         return c->remote_addr_ == remote_addr
+                                && c->remote_port_ == remote_port;
+                       });
+    if (it == connections_list_.cend()) {
+      auto c = conn_factory_(local_addr_, port_, remote_addr, remote_port);
+      auto conn = std::make_shared<TcpConnectionT>(std::move(c));
+      connections_list_.push_front(conn);
+      return conn;
     } else {
-      connections_list_.push_front(std::move(conn));
-      return true;
+      return *it;
     }
   }
 
@@ -565,9 +556,9 @@ public:
   RemoveConnection(AddrType remoteAddr, uint_fast16_t remotePort)
   {
     auto it = std::find_if(connections_list_.begin(), connections_list_.end(),
-                           [&](const TcpConnectionT &conn) {
-                             return conn.remote_addr_ == remoteAddr
-                                    && conn.remote_port_ == remotePort;
+                           [&](const std::shared_ptr<TcpConnectionT> &conn) {
+                             return conn->remote_addr_ == remoteAddr
+                                    && conn->remote_port_ == remotePort;
                            });
     if (it != connections_list_.end()) {
       connections_list_.erase_after(it);
@@ -579,47 +570,39 @@ public:
   virtual bool
   RemoveConnection(AddrType remoteAddr)
   {
-    bool found = false;
-    for (auto it = connections_list_.begin(); it != connections_list_.end();) {
-      if (it->remote_addr_ == remoteAddr) {
-        it = connections_list_.erase_after(it);
-        found = true;
-      } else {
-        ++it;
-      }
-    }
-    return found;
+    auto num_removed = connections_list_.remove_if(
+        [&](const std::shared_ptr<TcpConnectionT> &conn) {
+          return conn->remote_addr_ == remoteAddr;
+        });
+    return num_removed > 0;
   }
 
-  virtual std::optional<std::reference_wrapper<TcpConnectionT> >
+  virtual std::shared_ptr<TcpConnectionT>
   GetConnection(AddrType &remoteAddr, uint_fast16_t remotePort)
   {
     auto it = std::find_if(connections_list_.begin(), connections_list_.end(),
-                           [&](const TcpConnectionT &conn) {
-                             return conn.remote_addr_ == remoteAddr
-                                    && conn.remote_port_ == remotePort;
+                           [&](const std::shared_ptr<TcpConnectionT> &conn) {
+                             return conn->remote_addr_ == remoteAddr
+                                    && conn->remote_port_ == remotePort;
                            });
     if (it != connections_list_.end()) {
-      return std::optional<std::reference_wrapper<TcpConnectionT> >(
-          std::ref(*it));
+      return *it;
     }
-    return std::nullopt;
+    return nullptr;
   }
 };
 
-template <typename AddrType, typename TcpConnectionT = TcpConnection<AddrType>,
-          typename TcpServiceT = TcpService<AddrType, TcpConnectionT> >
+template <typename Factory, typename TcpConnFactory, typename AddrType>
+concept FactoryForTcpService
+    = requires(Factory f, TcpConnFactory cf, AddrType a, uint_fast16_t p)
+{
+  { f(std::move(cf), a, p) }
+      ->std::convertible_to<TcpService<AddrType, TcpConnFactory> >;
+};
+
+template <typename AddrType, typename TcpServiceT>
 class UserspaceTcpStack
 {
-#if 0
-  static_assert(std::is_base_of_v<TcpConnection<AddrType>, TcpConnectionT>,
-                "TcpConnectionT must derive from TcpConnection<AddrType>");
-  static_assert(std::is_base_of_v<TcpService<AddrType>, TcpServiceT>
-                    || std::is_base_of_v<TcpService<AddrType, TcpConnectionT>,
-                                         TcpServiceT>,
-                "TcpServiceT must derive from TcpService");
-#endif
-
 protected:
   std::mutex mutex_;
   // Remove connections_list_ from here
@@ -750,13 +733,19 @@ public:
     local_addr_ = addr;
   }
 
-  auto
-  AddSimpleService(uint_fast16_t port)
+  bool
+  AddService(std::shared_ptr<TcpServiceT> service)
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto service = std::make_shared<TcpServiceT>(local_addr_, port);
-    services_.emplace_front(service);
-    return std::weak_ptr<TcpServiceT>(service);
+    auto it = std::find_if(services_.begin(), services_.end(),
+                           [service](std::shared_ptr<TcpServiceT> &it) {
+                             return it->GetPort() == service->GetPort();
+                           });
+    if (it == services_.end()) {
+      services_.push_front(service);
+      return true;
+    }
+    return false;
   }
 
   bool

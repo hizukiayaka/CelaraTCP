@@ -15,15 +15,17 @@
 namespace celaratcp {
 namespace netio {
 
-template <typename AddrType, NetPacketWrapper PacketContainer
-                             = std::vector<std::shared_ptr<NetPacket> > >
-class TcpConnectionChan : public TcpConnection<AddrType>
+template <typename AddrType,
+          NetPacketWrapper PacketContainer
+          = std::vector<std::shared_ptr<NetPacket> >,
+          CheckSumPolicy Policy = CheckSumPolicy::None>
+class TcpConnectionChan : public TcpConnection<AddrType, Policy>
 {
 public:
   // Use asio::experimental::channel_traits<asio::any_io_executor> for
   // compatibility
-  using ChannelType
-      = asio::experimental::concurrent_channel<void(PacketContainer &&)>;
+  using ChannelType = asio::experimental::concurrent_channel<void(
+      asio::error_code, PacketContainer &&)>;
 
   using PayloadWrapType = PacketContainer;
 
@@ -63,14 +65,15 @@ public:
   void
   submitRxChann(PacketContainer &&packets)
   {
-    rx_chan_.async_send(std::move(packets), [](std::error_code) {});
+    rx_chan_.async_send(asio::error_code{}, std::move(packets),
+                        [](asio::error_code) {});
   }
 
   asio::awaitable<PacketContainer>
   fetchPackets()
   {
-    PacketContainer packets;
-    co_await rx_chan_.async_receive(packets, asio::use_awaitable);
+    PacketContainer packets
+        = co_await rx_chan_.async_receive(asio::use_awaitable);
     co_return packets;
   }
 
@@ -78,26 +81,13 @@ private:
   ChannelType rx_chan_;
 };
 
-template <typename AddrType, typename TcpConnectionT>
-concept HasRequiredConnTCtor
-    = requires(TcpConnectionT conn, AddrType local_addr,
-               uint_fast16_t local_port, AddrType remote_addr,
-               uint_fast16_t remote_port, asio::any_io_executor &ex)
-{
-  TcpConnectionT(local_addr, local_port, remote_addr, remote_port, ex);
-};
-
 using shared_netbuf_pool_t
     = std::shared_ptr<recycle::shared_pool<NetMemChunk> >;
 
-template <typename AddrType, typename TcpConnectionT, typename TcpServiceT,
-          typename NetworkIOObjectT>
-requires
-    HasRequiredConnTCtor<AddrType, TcpConnectionT> class AsyncUserspaceTcpStack
-    : public UserspaceTcpStack<AddrType, TcpConnectionT, TcpServiceT>
+template <typename AddrType, typename TcpServiceT, typename NetworkIOObjectT>
+class AsyncUserspaceTcpStack : public UserspaceTcpStack<AddrType, TcpServiceT>
 {
 protected:
-  asio::any_io_executor executor_;
   std::shared_ptr<NetworkIOObjectT> nout_;
   shared_netbuf_pool_t hdr_pool_;
 
@@ -111,11 +101,10 @@ protected:
   }
 
 public:
-  AsyncUserspaceTcpStack(asio::any_io_executor &&ex,
-                         std::shared_ptr<NetworkIOObjectT> net_io,
+  AsyncUserspaceTcpStack(std::shared_ptr<NetworkIOObjectT> net_io,
                          shared_netbuf_pool_t hdr_pool)
-      : UserspaceTcpStack<AddrType, TcpConnectionT, TcpServiceT>(),
-        executor_(std::move(ex)), nout_(std::move(net_io)), hdr_pool_(hdr_pool)
+      : UserspaceTcpStack<AddrType, TcpServiceT>(), nout_(std::move(net_io)),
+        hdr_pool_(hdr_pool)
   {
   }
 
@@ -155,7 +144,7 @@ public:
 
   template <NetPacketWrapper PacketContainer>
   asio::awaitable<TcpStackState>
-  ProcessIncomingPackets(PacketContainer &packets)
+  ProcessIncomingPackets(PacketContainer &&packets)
   {
     auto total_bytes_used = std::accumulate(
         packets.cbegin(), packets.cend(), std::size_t(0),
@@ -204,23 +193,22 @@ public:
     auto tcpFlags = static_cast<uint8_t>(data[13]);
     if (tcpFlags == 0x12) {
       // SYN-ACK
-      auto conn_op = service->GetConnection(src_addr, src_port);
-      if (conn_op) {
-        auto &conn = conn_op->get();
-        if (conn.state_ == TcpConnectionState::SYN_SENT) {
+      auto conn = service->GetConnection(src_addr, src_port);
+      if (conn) {
+        if (conn->state_ == TcpConnectionState::SYN_SENT) {
           auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
-          conn.UpdateRecvSeq(TcpPacketType::SYN_ACK, seqNum);
+          conn->UpdateRecvSeq(TcpPacketType::SYN_ACK, seqNum);
 
           auto reply = hdr_pool_->allocate();
-          conn.FillPacketIpTcpHdr(TcpPacketType::ACK, *reply);
+          conn->FillPacketIpTcpHdr(TcpPacketType::ACK, *reply);
 
           auto ret = co_await tx_callback_(std::move(reply->GetConstBuf()));
           if (ret >= reply->GetUsedBytes()) {
-            conn.UpdateSentSeq(TcpPacketType::ACK, 0, 1);
+            conn->UpdateSentSeq(TcpPacketType::ACK, 0, 1);
 
-            conn.state_ = TcpConnectionState::ESTABLISHED;
-            conn.FreshActivity();
-            conn.Established();
+            conn->state_ = TcpConnectionState::ESTABLISHED;
+            conn->FreshActivity();
+            conn->Established();
 
             co_return TcpStackState::SUCCESS;
           }
@@ -232,11 +220,10 @@ public:
       co_return TcpStackState::ERR_ARGUMENT;
     } else if (tcpFlags == 0x11) {
       // FIN-ACK
-      auto conn_op = service->GetConnection(src_addr, src_port);
-      if (conn_op) {
-        auto &conn = conn_op->get();
-        if (conn.state_ == TcpConnectionState::ESTABLISHED) {
-          conn.state_ = TcpConnectionState::CLOSE_WAIT;
+      auto conn = service->GetConnection(src_addr, src_port);
+      if (conn) {
+        if (conn->state_ == TcpConnectionState::ESTABLISHED) {
+          conn->state_ = TcpConnectionState::CLOSE_WAIT;
           // TODO
           co_return TcpStackState::SUCCESS;
         } else {
@@ -246,42 +233,42 @@ public:
       co_return TcpStackState::ERR_ARGUMENT;
     } else if (tcpFlags == 0x10) {
       // ACK
-      auto conn_op = service->GetConnection(src_addr, src_port);
-      if (conn_op) {
-        auto &conn = conn_op->get();
-        if (conn.state_ == TcpConnectionState::SYN_SENT) {
+      auto conn = service->GetConnection(src_addr, src_port);
+      if (conn) {
+        if (conn->state_ == TcpConnectionState::SYN_SENT) {
           // wrong flag, should be SYN-ACK
           co_return TcpStackState::ERR_ARGUMENT;
-        } else if (conn.state_ == TcpConnectionState::SYN_RECEIVED) {
-          conn.state_ = TcpConnectionState::ESTABLISHED;
-          conn.FreshActivity();
-          conn.Established();
+        } else if (conn->state_ == TcpConnectionState::SYN_RECEIVED) {
+          conn->state_ = TcpConnectionState::ESTABLISHED;
+          conn->FreshActivity();
+          conn->Established();
           // jump out state check
-        } else if (conn.state_ == TcpConnectionState::ESTABLISHED) {
+        } else if (conn->state_ == TcpConnectionState::ESTABLISHED) {
           // jump out state check
         } else {
           co_return TcpStackState::ERR_ARGUMENT;
         }
 
         auto ackNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 8));
-        conn.UpdateRecvAck(TcpPacketType::ACK, ackNum);
+        conn->UpdateRecvAck(TcpPacketType::ACK, ackNum);
 
         auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
 
         auto payload_size = total_bytes_used - payload_offset;
         if (payload_size) {
-          constexpr bool kAcceptedPackets
-              = TcpConnectionT::IsNetPacketContainer();
+          constexpr bool kAcceptedPackets = std::remove_reference_t<decltype(
+              *conn)>::IsNetPacketContainer();
 
           if constexpr (!kAcceptedPackets) {
-            static_assert(
-                std::is_same_v<typename TcpConnectionT::PayloadWrapType,
-                               typename std::remove_reference_t<
-                                   PacketContainer>::value_type>,
-                "mismatch type for payload packet");
+            static_assert(std::is_same_v<typename std::remove_reference_t<
+                                             decltype(*conn)>::PayloadWrapType,
+                                         typename std::remove_reference_t<
+                                             PacketContainer>::value_type>,
+                          "mismatch type for payload packet");
           }
 
-          typename TcpConnectionT::PayloadWrapType payloadPackets;
+          typename std::remove_reference_t<decltype(*conn)>::PayloadWrapType
+              payloadPackets;
 
           // TODO: process the case partial payload in header packet
           auto pit = packets.begin();
@@ -299,10 +286,10 @@ public:
             payloadPackets.swap(*pit);
           }
 
-          conn.UpdateRecvSeq(TcpPacketType::ACK, seqNum, payload_size);
-          conn.submitRxChann(std::move(payloadPackets));
+          conn->UpdateRecvSeq(TcpPacketType::ACK, seqNum, payload_size);
+          conn->submitRxChann(std::move(payloadPackets));
         } else {
-          conn.UpdateRecvSeq(TcpPacketType::ACK, seqNum);
+          conn->UpdateRecvSeq(TcpPacketType::ACK, seqNum);
         }
 
         co_return TcpStackState::SUCCESS;
@@ -311,31 +298,26 @@ public:
       }
     } else if (tcpFlags == 0x02) {
       // SYN
-      auto conn_op = service->GetConnection(src_addr, src_port);
-      if (conn_op) {
-        [[maybe_unused]] auto &conn = conn_op->get();
-
+      auto conn = service->AddConnection(src_addr, src_port);
+      if (conn->state_ != TcpConnectionState::LISTEN) {
         // TODO: reset existed connection
         co_return TcpStackState::SUCCESS;
       }
-      auto conn = TcpConnectionT(service->GetLocalAddr(), service->GetPort(),
-                                 src_addr, src_port, executor_);
 
-      conn.state_ = TcpConnectionState::SYN_RECEIVED;
+      conn->state_ = TcpConnectionState::SYN_RECEIVED;
       auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
-      conn.UpdateRecvSeq(TcpPacketType::SYN, seqNum);
+      conn->UpdateRecvSeq(TcpPacketType::SYN, seqNum);
 
       auto reply = hdr_pool_->allocate();
-      conn.FillPacketIpTcpHdr(TcpPacketType::SYN_ACK, *reply);
+      conn->FillPacketIpTcpHdr(TcpPacketType::SYN_ACK, *reply);
 
       auto ret = co_await tx_callback_(std::move(reply->GetConstBuf()));
       if (ret >= reply->GetUsedBytes()) {
         seqNum = this->InitialConnSeq(service->GetLocalAddr(),
                                       service->GetPort(), src_addr, src_port);
-        conn.UpdateSentSeq(TcpPacketType::SYN_ACK, seqNum, 1);
-        conn.FreshActivity();
+        conn->UpdateSentSeq(TcpPacketType::SYN_ACK, seqNum, 1);
+        conn->FreshActivity();
 
-        service->AddConnection(std::move(conn), false);
         co_return TcpStackState::SUCCESS;
       }
       co_return TcpStackState::DROP;
@@ -346,21 +328,20 @@ public:
 };
 
 template <typename AddrType, typename NetworkIOObjectT,
-          typename FactoryFunction>
+          typename TcpServiceFactory>
 auto
-MakeAsyncTcpStack(asio::any_io_executor &&ex,
-                  std::shared_ptr<NetworkIOObjectT> net_io,
-                  shared_netbuf_pool_t hdr_pool, FactoryFunction factory)
+MakeAsyncTcpStack(std::shared_ptr<NetworkIOObjectT> net_io,
+                  shared_netbuf_pool_t hdr_pool, TcpServiceFactory)
 {
 
-  using TcpConnectionTRealType = decltype(
-      factory(std::declval<AddrType>(), std::declval<uint_fast16_t>(),
-              std::declval<AddrType>(), std::declval<uint_fast16_t>()));
+  using ServiceTSharedPtrT
+      = std::invoke_result_t<TcpServiceFactory, const AddrType &,
+                             uint_fast16_t>;
 
-  return AsyncUserspaceTcpStack<AddrType, TcpConnectionTRealType,
-                                TcpService<AddrType, TcpConnectionTRealType>,
-                                NetworkIOObjectT>(std::move(ex),
-                                                  std::move(net_io), hdr_pool);
+  using TcpServiceT = typename ServiceTSharedPtrT::element_type;
+
+  return AsyncUserspaceTcpStack<AddrType, TcpServiceT, NetworkIOObjectT>(
+      std::move(net_io), hdr_pool);
 }
 
 } // namespace netio
