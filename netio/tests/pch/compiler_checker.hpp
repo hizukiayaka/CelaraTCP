@@ -8,6 +8,7 @@
 #include <iostream>
 #include <list>
 #include <optional>
+#include <functional>
 
 #include <asio.hpp>
 #include <asio/awaitable.hpp>

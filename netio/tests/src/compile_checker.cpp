@@ -88,6 +88,7 @@ work(std::shared_ptr<recycle::shared_pool<NetMemChunk> > pool, auto stream,
   co_await tcp_stack.ProcessIncomingPackets(pkts);
 }
 
+#if 0
 void
 run2()
 {
@@ -113,7 +114,7 @@ run2()
   };
 
   auto tcp_stack = netio::MakeAsyncTcpStack<asio::ip::address_v4>(
-      std::move(ex), stream, hdr_pool, conn_factory);
+      stream, hdr_pool, conn_factory);
   tcp_stack.SetLocalAddress(net1.address());
   tcp_stack.AddSimpleService(5162);
 
@@ -121,11 +122,42 @@ run2()
 
   ioc.run();
 }
+#endif
 
 int
 main(int argc, char *argv[])
 {
-  run2();
+  // run2();
+  auto conn_factory =
+      [](const asio::ip::address_v4 &local_addr, uint_fast16_t local_port,
+         const asio::ip::address_v4 &remote_addr, uint_fast16_t remote_port) {
+        return netio::TcpConnection<asio::ip::address_v4>(
+            local_addr, local_port, remote_addr, remote_port);
+      };
+
+  auto serv_factory = [&conn_factory](const asio::ip::address_v4 &local_addr,
+                                      uint_fast16_t local_port) {
+    return std::make_shared<
+        netio::TcpService<asio::ip::address_v4, decltype(conn_factory)> >(
+        std::move(conn_factory), local_addr, local_port);
+  };
+
+  asio::io_context ioc;
+  auto stream = std::make_shared<asio::posix::stream_descriptor>(ioc);
+
+  memmanger::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
+  auto hdr_pool = std::make_shared<recycle::shared_pool<NetMemChunk> >(
+      [&alloc]() { return alloc.Allocation(); });
+
+  hdr_pool->reserve(20);
+
+  auto tcp_stack = netio::MakeAsyncTcpStack<asio::ip::address_v4>(
+      stream, hdr_pool, serv_factory);
+
+  asio::ip::network_v4 net1(asio::ip::make_address_v4("169.254.3.1"), 32);
+  auto serv = serv_factory(net1.address(), 3000);
+
+  tcp_stack.AddService(serv);
 
   return 0;
 }
