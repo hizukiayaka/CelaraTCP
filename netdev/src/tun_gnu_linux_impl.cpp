@@ -348,20 +348,20 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddPeerNode(
       return false;
     }
     // Find the map_fd for the given dst_port
-    int map_fd = -1;
-    auto it = services_mapfd_v4_list_.end();
-    for (auto iter = services_mapfd_v4_list_.begin();
-         iter != services_mapfd_v4_list_.end(); ++iter)
-    {
-      if (iter->port == dst_port) {
-        map_fd = iter->map_fd;
-        it = iter;
-        break;
-      }
-    }
-    if (map_fd < 0 || it == services_mapfd_v4_list_.end()) {
+    auto it = std::find_if(services_mapfd_v4_list_.begin(),
+        services_mapfd_v4_list_.end(),
+        [dst_port](const PortMapFdPair &pair) {
+            return pair.port == dst_port;
+        });
+
+    if (it == services_mapfd_v4_list_.end()) {
       return false;
     }
+
+    int map_fd = it->map_fd;
+    if (map_fd < 0)
+        return false;
+
     PeerEntry peer{ addr, src_port };
     auto &peers = it->peers;
     // Find empty slot or existing peer
@@ -394,24 +394,24 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddPeerNode(
     }
   } else if (addr.is_v6()) {
     if (services_v6_mapfd_ < 0) {
-      fprintf(stderr, "Services v6 map fd is not set\n");
       return false;
     }
-    int map_fd = -1;
-    auto it = services_mapfd_v6_list_.end();
-    for (auto iter = services_mapfd_v6_list_.begin();
-         iter != services_mapfd_v6_list_.end(); ++iter)
-    {
-      if (iter->port == dst_port) {
-        map_fd = iter->map_fd;
-        it = iter;
-        break;
-      }
-    }
-    if (map_fd < 0 || it == services_mapfd_v6_list_.end()) {
-      fprintf(stderr, "No map fd found for dport %u\n", dst_port);
+
+    // Find empty slot or existing peer
+    auto it = std::find_if(services_mapfd_v6_list_.begin(),
+        services_mapfd_v6_list_.end(),
+        [dst_port](const PortMapFdPair &pair) {
+            return pair.port == dst_port;
+        });
+
+    if (it == services_mapfd_v6_list_.end()) {
       return false;
     }
+
+    int map_fd = it->map_fd;
+    if (map_fd < 0)
+        return false;
+
     PeerEntry peer{ addr, src_port };
     auto &peers = it->peers;
     // Find empty slot or existing peer
@@ -454,20 +454,20 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemovePeerNode(
       return false;
     }
     // Find the map_fd for the given dst_port
-    int map_fd = -1;
-    auto it = services_mapfd_v4_list_.end();
-    for (auto iter = services_mapfd_v4_list_.begin();
-         iter != services_mapfd_v4_list_.end(); ++iter)
-    {
-      if (iter->port == dst_port) {
-        map_fd = iter->map_fd;
-        it = iter;
-        break;
-      }
-    }
-    if (map_fd < 0 || it == services_mapfd_v4_list_.end()) {
+    auto it = std::find_if(services_mapfd_v4_list_.begin(),
+        services_mapfd_v4_list_.end(),
+        [dst_port](const PortMapFdPair &pair) {
+            return pair.port == dst_port;
+        });
+
+    if (it == services_mapfd_v4_list_.end()) {
       return false;
     }
+
+    int map_fd = it->map_fd;
+    if (map_fd < 0)
+        return false;
+
     PeerEntry peer{ addr, src_port };
     auto &peers = it->peers;
     auto found = std::find_if(peers.begin(), peers.end(),
@@ -486,20 +486,22 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemovePeerNode(
     if (services_v6_mapfd_ < 0) {
       return false;
     }
-    int map_fd = -1;
-    auto it = services_mapfd_v6_list_.end();
-    for (auto iter = services_mapfd_v6_list_.begin();
-         iter != services_mapfd_v6_list_.end(); ++iter)
-    {
-      if (iter->port == dst_port) {
-        map_fd = iter->map_fd;
-        it = iter;
-        break;
-      }
-    }
-    if (map_fd < 0 || it == services_mapfd_v6_list_.end()) {
+
+    // Find empty slot or existing peer
+    auto it = std::find_if(services_mapfd_v6_list_.begin(),
+        services_mapfd_v6_list_.end(),
+        [dst_port](const PortMapFdPair &pair) {
+            return pair.port == dst_port;
+        });
+
+    if (it == services_mapfd_v6_list_.end()) {
       return false;
     }
+
+    int map_fd = it->map_fd;
+    if (map_fd < 0)
+        return false;
+
     PeerEntry peer{ addr, src_port };
     auto &peers = it->peers;
     auto found = std::find_if(
