@@ -25,10 +25,13 @@
 using namespace celaratcp;
 using namespace celaratcp::netio;
 
-template <typename addrType>
-class Session : public TcpConnectionChan<addrType, std::shared_ptr<NetPacket> >
+template <typename AddrType, typename NetworkIOObjectT>
+class Session
+    : public TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk> >
 {
 private:
+  using pool_t = recycle::shared_pool<NetMemChunk>;
+
   asio::awaitable<void>
   tcp_receiver()
   {
@@ -36,7 +39,7 @@ private:
       auto pkt = co_await this->fetchPackets();
       auto buf = pkt->GetConstBuf();
 
-      co_await asio::async_write(udp_socket_, buf, asio::use_awaitable);
+      co_await udp_socket_.async_send(buf, asio::use_awaitable);
     }
   }
 
@@ -44,51 +47,57 @@ private:
   udp_receiver()
   {
     for (;;) {
-      auto pkt = this->tx_payload_pool_->allocate();
+      auto pkt = tx_payload_pool_->allocate();
       auto buf = pkt->GetMutableBuf();
-      auto [ec, bytes] = co_await asio::async_read(this->udp_socket_, buf,
-                                                   asio::use_awaitable);
-      if (!ec) {
-        pkt->SetUsedBytes(bytes);
-      }
-      co_await this->chan_tx_.async_send(ec, pkt, asio::use_awaitable);
+      auto bytes
+          = co_await udp_socket_.async_receive(buf, asio::use_awaitable);
+      pkt->SetUsedBytes(bytes);
+      co_await chan_tx_.async_send(asio::error_code{}, pkt,
+                                   asio::use_awaitable);
     }
   }
 
   asio::awaitable<void>
-  udp_forward_tcp(recycle::shared_pool<NetMemChunk> &hdr_pool,
+  udp_forward_tcp(std::shared_ptr<pool_t> hdr_pool,
                   asio::experimental::channel<void(
-                      asio::error_code, std::shared_ptr<NetPacket>)> &chan)
+                      asio::error_code, std::shared_ptr<NetMemChunk>)> &chan)
   {
     for (;;) {
       auto pkt = co_await chan.async_receive(asio::use_awaitable);
-      auto hdr = hdr_pool.allocate();
+      auto hdr = hdr_pool->allocate();
 
-      FillPacketIpTcpHdr(TcpPacketType::ACK, hdr, pkt);
+      TcpConnection<AddrType>::FillPacketIpTcpHdr(TcpPacketType::ACK, *hdr,
+                                                  pkt);
       std::list<asio::const_buffer> bufs
           = { hdr->GetConstBuf(), pkt->GetConstBuf() };
-      // TODO: ask the TcpStack send it.
+
+      // We just call network stream object to handle, TcpStack should have
+      // been updated when it fills the packets.
+      co_await asio::async_write(*nout_, std::move(bufs), asio::use_awaitable);
     }
   }
 
 public:
 #if 0
-  explicit Session(asio::io_context &ioc, const addrType &local_addr,
-          uint_fast16_t local_port, const addrType &remote_addr,
+  explicit Session(asio::io_context &ioc, const AddrType &local_addr,
+          uint_fast16_t local_port, const AddrType &remote_addr,
           uint_fast16_t remote_port, uint16_t udp_port)
-      : TcpConnectionChan<addrType, std::shared_ptr<NetPacket> >(
+      : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk> >(
             ioc, local_addr, local_port, remote_addr, remote_port),
         ioc_(ioc), chan_tx_(ioc, 32), udp_socket_(ioc)
   {
     tx_payload_pool_->reserve(20);
   }
 #endif
-  explicit Session(const addrType &local_addr, uint_fast16_t local_port,
-                   const addrType &remote_addr, uint_fast16_t remote_port,
-                   asio::any_io_executor &ex)
-      : TcpConnectionChan<addrType, std::shared_ptr<NetPacket> >(
+  explicit Session(const AddrType &local_addr, uint_fast16_t local_port,
+                   const AddrType &remote_addr, uint_fast16_t remote_port,
+                   asio::any_io_executor &ex,
+                   std::shared_ptr<NetworkIOObjectT> net_io,
+                   uint_fast16_t udp_port)
+      : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk> >(
             local_addr, local_port, remote_addr, remote_port, ex),
-        ex_(ex), chan_tx_(ex_, 32), udp_socket_(ex_)
+        ex_(ex), nout_(std::move(net_io)), udp_port_(udp_port),
+        chan_tx_(ex_, 32), udp_socket_(ex_)
   {
     tx_payload_pool_->reserve(20);
   }
@@ -96,28 +105,29 @@ public:
   virtual void
   Established() override
   {
-#if 0
+    // FIXME: udp port
     asio::ip::udp::endpoint dest(asio::ip::address_v6::from_string("::1"),
-                                 udp_port);
+                                 udp_port_);
 
     udp_socket_.open(asio::ip::udp::v6());
     udp_socket_.connect(dest);
-#endif
 
     asio::co_spawn(ex_, tcp_receiver(), asio::detached);
     asio::co_spawn(ex_, udp_receiver(), asio::detached);
-    asio::co_spawn(ex_, udp_forward_tcp(tx_hdr_pool_, chan_tx_));
+    asio::co_spawn(ex_, udp_forward_tcp(tx_hdr_pool_, chan_tx_),
+                   asio::detached);
   }
 
 private:
   asio::any_io_executor &ex_;
+  std::shared_ptr<NetworkIOObjectT> nout_;
+  uint_fast16_t udp_port_;
 
-  using pool_t = recycle::shared_pool<NetMemChunk>;
   std::shared_ptr<pool_t> tx_hdr_pool_;
   std::shared_ptr<pool_t> tx_payload_pool_;
 
   asio::experimental::channel<void(asio::error_code,
-                                   std::shared_ptr<NetPacket>)>
+                                   std::shared_ptr<NetMemChunk>)>
       chan_tx_;
 
   asio::ip::udp::socket udp_socket_;
@@ -137,14 +147,14 @@ private:
 
 #if 0
   using HdrPacketType =
-      typename std::conditional<std::is_same_v<addrType, asio::ip::address_v4>,
+      typename std::conditional<std::is_same_v<AddrType, asio::ip::address_v4>,
                Ipv4TcpHdrPacket, Ipv6TcpHdrPacket>::type;
 #endif
 
   memmanger::SimpleHeapAllocator<NetMemChunk> hdr_alloc_;
   std::shared_ptr<recycle::shared_pool<NetMemChunk>> hdr_pool_;
-  recycle::shared_pool<NetPacketSW<kRegularMtu> > rx_hdr_pool_;
-  recycle::shared_pool<NetPacketSW<kRegularMtu> > rx_payload_pool_;
+  recycle::shared_pool<NetMemChunkSW<kRegularMtu> > rx_hdr_pool_;
+  recycle::shared_pool<NetMemChunkSW<kRegularMtu> > rx_payload_pool_;
 
   asio::any_io_executor exec_;
   TcpStackT tcp_stack_;
@@ -216,8 +226,9 @@ main(int argc, char *argv[])
 
   asio::io_context ioc;
   asio::any_io_executor exec = ioc.get_executor();
-  netdev::VirtualNetDev netdev(exec, interface_name,
-                               asio::ip::address_v4::from_string(address));
+
+  auto netdev = std::make_shared<netdev::VirtualNetDev>(
+      exec, interface_name, asio::ip::address_v4::from_string(address));
 
   memmanger::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kIpv4HdrSize);
   std::shared_ptr<recycle::shared_pool<NetMemChunk> > hdr_pool
@@ -225,10 +236,25 @@ main(int argc, char *argv[])
           [&hdr_alloc]() { return hdr_alloc.Allocation(); });
   hdr_pool->reserve(20);
 
-  auto tcp_stack
-      = MakeAsyncTcpStack<asio::ip::address_v4, Session<asio::ip::address_v4>,
-                          TcpService<asio::ip::address_v4> >(exec, netdev,
-                                                             hdr_pool);
+  auto conn_factory
+      = [&exec, &netdev, &udp_port](const asio::ip::address_v4 &local_addr,
+                                    uint_fast16_t local_port,
+                                    const asio::ip::address_v4 &remote_addr,
+                                    uint_fast16_t remote_port) {
+          return Session<asio::ip::address_v4, netdev::VirtualNetDev>(
+              local_addr, local_port, remote_addr, remote_port, exec, netdev,
+              udp_port);
+        };
+
+  auto serv_factory = [&conn_factory](const asio::ip::address_v4 &local_addr,
+                                      uint_fast16_t local_port) {
+    return std::make_shared<
+        netio::TcpService<asio::ip::address_v4, decltype(conn_factory)> >(
+        std::move(conn_factory), local_addr, local_port);
+  };
+
+  auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(
+      std::move(exec), netdev, hdr_pool, serv_factory);
 
   // TcpChanUdpService service(ioc, netdev, tcp_port, udp_port);
   // service.start();
