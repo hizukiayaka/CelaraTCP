@@ -53,7 +53,7 @@ private:
           = co_await udp_socket_.async_receive(buf, asio::use_awaitable);
       pkt->SetUsedBytes(bytes);
       co_await chan_tx_.async_send(asio::error_code{}, pkt,
-                                   asio::use_awaitable);
+                                         asio::use_awaitable);
     }
   }
 
@@ -78,17 +78,6 @@ private:
   }
 
 public:
-#if 0
-  explicit Session(asio::io_context &ioc, const AddrType &local_addr,
-          uint_fast16_t local_port, const AddrType &remote_addr,
-          uint_fast16_t remote_port, uint16_t udp_port)
-      : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk> >(
-            ioc, local_addr, local_port, remote_addr, remote_port),
-        ioc_(ioc), chan_tx_(ioc, 32), udp_socket_(ioc)
-  {
-    tx_payload_pool_->reserve(20);
-  }
-#endif
   explicit Session(const AddrType &local_addr, uint_fast16_t local_port,
                    const AddrType &remote_addr, uint_fast16_t remote_port,
                    asio::any_io_executor &ex,
@@ -105,7 +94,6 @@ public:
   virtual void
   Established() override
   {
-    // FIXME: udp port
     asio::ip::udp::endpoint dest(asio::ip::address_v6::from_string("::1"),
                                  udp_port_);
 
@@ -227,8 +215,10 @@ main(int argc, char *argv[])
   asio::io_context ioc;
   asio::any_io_executor exec = ioc.get_executor();
 
+  auto local_addr = asio::ip::address_v4::from_string(address);
+
   auto netdev = std::make_shared<netdev::VirtualNetDev>(
-      exec, interface_name, asio::ip::address_v4::from_string(address));
+      exec, interface_name, local_addr);
 
   memmanger::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kIpv4HdrSize);
   std::shared_ptr<recycle::shared_pool<NetMemChunk> > hdr_pool
@@ -256,8 +246,10 @@ main(int argc, char *argv[])
   auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(
       std::move(exec), netdev, hdr_pool, serv_factory);
 
-  // TcpChanUdpService service(ioc, netdev, tcp_port, udp_port);
-  // service.start();
+  auto service = serv_factory(local_addr, tcp_port);
+  tcp_stack.AddService(service);
+
+  // TODO: retrieve packet from network IO object and push to TCP stack
 
   ioc.run();
 
