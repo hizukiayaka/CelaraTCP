@@ -4,6 +4,9 @@ ebpf_sources = ['steering_multiq.bpf.c',
   'xdp_test.bpf.c',
   ]  # List of eBPF source files
 
+ebpf_obj_dir = join_paths(get_option('prefix'), get_option('libdir'),
+                          meson.project_name())
+
 netdev_ebpf_skeletons = []
 foreach src : ebpf_sources
   obj = custom_target(
@@ -18,8 +21,11 @@ foreach src : ebpf_sources
       '-c', '@INPUT@',
       '-o', '@OUTPUT@'
     ],
-    build_by_default: true
+    build_by_default: true,
+    install: true,
+    install_dir: ebpf_obj_dir
   )
+
   netdev_ebpf_skeletons += custom_target(
     src.split('.')[0] + '_skel',
     input: obj,
@@ -31,6 +37,3 @@ foreach src : ebpf_sources
     build_by_default: true
   )
 endforeach
-
-# Optionally, install the compiled eBPF objects
-#install_data(ebpf_objects, install_dir: get_option('prefix') + '/lib/ebpf')
