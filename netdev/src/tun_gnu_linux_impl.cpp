@@ -53,9 +53,9 @@ private:
   std::list<PortMapFdPair> services_mapfd_v6_list_;
   std::function<bool(int)> on_load_ebpf_callback_;
 
-  bool attachXdpProgram(const std::string &xdp_program_path);
-  bool attachSteeringEbpf(const std::string &ebpf_program_path);
-  int LoadFilterEbpf(const std::string &ebpf_program_path);
+  bool attachXdpProgram(std::string_view xdp_program_path);
+  bool attachSteeringEbpf(std::string_view ebpf_program_path);
+  int LoadFilterEbpf(std::string_view ebpf_program_path);
 
 public:
   TunGnuLinuxDetailImpl();
@@ -170,9 +170,9 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv6Address(
 
 bool
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::attachXdpProgram(
-    const std::string &xdp_program_path)
+    std::string_view xdp_program_path)
 {
-  int prog_fd = bpf_obj_get(xdp_program_path.c_str());
+  int prog_fd = bpf_obj_get(xdp_program_path.data());
   if (prog_fd < 0) {
     return false;
   }
@@ -187,7 +187,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::attachXdpProgram(
 
 bool
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::attachSteeringEbpf(
-    [[maybe_unused]] const std::string &ebpf_program_path)
+    [[maybe_unused]] std::string_view ebpf_program_path)
 {
   return false;
 }
@@ -202,7 +202,11 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::GetSupportFilterType() const
 bool
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilter()
 {
-  std::string obj_path = "xmit_filter.o";
+#ifndef EBPF_OBJECT_DIR
+#error "EBPF_OBJECT_DIR must be defined by the build system"
+#endif
+
+  constexpr std::string_view obj_path = EBPF_OBJECT_DIR "/xmit_filter.o";
   return LoadFilterEbpf(obj_path);
 }
 
@@ -520,10 +524,10 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemovePeerNode(
 
 int
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilterEbpf(
-    const std::string &ebpf_program_path)
+    std::string_view ebpf_program_path)
 {
   struct bpf_object *obj
-      = bpf_object__open_file(ebpf_program_path.c_str(), nullptr);
+      = bpf_object__open_file(ebpf_program_path.data(), nullptr);
   if (!obj) {
     return false;
   }
