@@ -12,9 +12,10 @@ extern "C"
 #include <netlink/socket.h>
 
 #include <bpf/bpf.h>
+#include <bpf/btf.h>
 #include <bpf/libbpf.h>
 
-#include "xmit_filter.bpf.h"
+#include "tun_egress.bpf.h"
 }
 
 #include "tun_gnu_linux_impl.hpp"
@@ -28,10 +29,13 @@ private:
   struct nl_sock *sk_;
   struct rtnl_link *link_;
   int ifindex_;
+
   struct bpf_object *filter_obj_;
   struct bpf_object *steering_obj_;
   struct bpf_program *filter_prog_;
   struct bpf_program *steering_prog_;
+
+  int filter_prog_fd_;
   int filter_map_fd_;
   int services_v4_mapfd_;
   int services_v6_mapfd_;
@@ -53,6 +57,8 @@ private:
   std::list<PortMapFdPair> services_mapfd_v6_list_;
   std::function<bool(int)> on_load_ebpf_callback_;
 
+  int LoadEgressFilterEbpf(std::string_view ebpf_program_path);
+
   bool attachXdpProgram(std::string_view xdp_program_path);
   bool attachSteeringEbpf(std::string_view ebpf_program_path);
   int LoadFilterEbpf(std::string_view ebpf_program_path);
@@ -63,6 +69,10 @@ public:
 
   void Initialize(const std::string &intl_name,
                   std::function<bool(int)> &&on_load_ebpf_callback);
+
+  void SetIpv4AddressPeer(const asio::ip::address_v4 &addr);
+  void SetIpv6AddressPeer(const asio::ip::address_v6 &addr);
+
   void AddIpv4Address(const asio::ip::address_v4 &addr);
   void AddIpv6Address(const asio::ip::address_v6 &addr);
 
@@ -91,13 +101,28 @@ public:
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::TunGnuLinuxDetailImpl()
     : sk_(nullptr), link_(nullptr), ifindex_(-1), filter_obj_(nullptr),
       steering_obj_(nullptr), filter_prog_(nullptr), steering_prog_(nullptr),
-      filter_map_fd_(-1), services_v4_mapfd_(-1), services_v6_mapfd_(-1)
+      filter_prog_fd_(-1), filter_map_fd_(-1), services_v4_mapfd_(-1), services_v6_mapfd_(-1)
 {
 }
 
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::~TunGnuLinuxDetailImpl()
 {
   nl_socket_free(sk_);
+
+  LIBBPF_OPTS(bpf_tc_hook, hook,
+              .ifindex = ifindex_,
+              .attach_point= BPF_TC_EGRESS,
+          );
+
+  LIBBPF_OPTS(bpf_tc_opts, opts,
+              .prog_fd = filter_prog_fd_,
+              .flags = BPF_TC_F_REPLACE,
+              .handle = 1,
+              .priority = 1,
+          );
+
+  bpf_tc_detach(&hook, &opts);
+  bpf_tc_hook_destroy(&hook);
 
   if (filter_obj_)
     bpf_object__close(filter_obj_);
@@ -127,12 +152,68 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::Initialize(
 }
 
 void
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetIpv4AddressPeer(
+    const asio::ip::address_v4 &addr)
+{
+  const auto n = addr.to_uint();
+  if (n == 0xFFFFFFFFu)
+      throw std::out_of_range("address_v4 overflow");
+
+  auto addr_d = addr.to_bytes();
+  struct nl_addr *local_addr
+      = nl_addr_build(AF_INET, addr_d.data(), addr_d.size());
+
+  struct rtnl_addr *rt_addr = rtnl_addr_alloc();
+
+  rtnl_addr_set_ifindex(rt_addr, ifindex_);
+  rtnl_addr_set_local(rt_addr, local_addr);
+
+  auto peer = asio::ip::make_address_v4(n + 1);
+  addr_d = peer.to_bytes();
+  struct nl_addr *peer_addr
+      = nl_addr_build(AF_INET, addr_d.data(), addr_d.size());
+  rtnl_addr_set_peer(rt_addr, peer_addr);
+  rtnl_addr_set_prefixlen(rt_addr, 32);
+
+  if (rtnl_addr_add(sk_, rt_addr, 0)) {
+    nl_addr_put(local_addr);
+    nl_addr_put(peer_addr);
+    rtnl_addr_put(rt_addr);
+    throw std::runtime_error("can't set peer addr");
+  }
+  nl_addr_put(local_addr);
+  nl_addr_put(peer_addr);
+  rtnl_addr_put(rt_addr);
+}
+
+void
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetIpv6AddressPeer(
+    const asio::ip::address_v6 &addr)
+{
+  auto addr_d = addr.to_bytes();
+  struct nl_addr *local_addr
+      = nl_addr_build(AF_INET6, addr_d.data(), addr_d.size());
+  struct rtnl_addr *rt_addr = rtnl_addr_alloc();
+
+  rtnl_addr_set_ifindex(rt_addr, ifindex_);
+  rtnl_addr_set_peer(rt_addr, local_addr);
+  if (rtnl_addr_add(sk_, rt_addr, 0)) {
+    nl_addr_put(local_addr);
+    rtnl_addr_put(rt_addr);
+    throw std::runtime_error("can't set addr");
+  }
+  nl_addr_put(local_addr);
+  rtnl_addr_put(rt_addr);
+}
+
+void
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv4Address(
     const asio::ip::address_v4 &addr)
 {
   auto addr_d = addr.to_bytes();
   struct nl_addr *local_addr
       = nl_addr_build(AF_INET, addr_d.data(), addr_d.size());
+
 
   struct rtnl_addr *rt_addr = rtnl_addr_alloc();
 
@@ -206,8 +287,12 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilter()
 #error "EBPF_OBJECT_DIR must be defined by the build system"
 #endif
 
+#if 0
   constexpr std::string_view obj_path = EBPF_OBJECT_DIR "/xmit_filter.o";
   return LoadFilterEbpf(obj_path);
+#endif
+  constexpr std::string_view obj_path = EBPF_OBJECT_DIR "/tun_egress.o";
+  return LoadEgressFilterEbpf(obj_path);
 }
 
 bool
@@ -226,6 +311,9 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetNetDevFilterType(
       break;
     case NetDevFiltertype::DROP_IPV6:
       value.drop_ipv6 = 1;
+      break;
+    case NetDevFiltertype::DROP_UDP:
+      value.drop_non_tcp = 1;
       break;
     case NetDevFiltertype::ACCEPT_4_TUPLE:
       value.drop_nomatch_tcp = 1;
@@ -253,6 +341,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv4Port(uint16_t port)
       return true; // Already exists
     }
   }
+#if 0
   std::string map_name = "port_ipv4_" + std::to_string(port);
   int inner_map_fd = bpf_map_create(
       BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32),
@@ -261,12 +350,53 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv4Port(uint16_t port)
     return false;
   }
 
-  if (bpf_map_update_elem(services_v4_mapfd_, &port, &inner_map_fd, BPF_ANY)
-      != 0)
+  auto ret = bpf_map_update_elem(services_v4_mapfd_, &port, &inner_map_fd, BPF_ANY);
+  if (ret != 0)
   {
     close(inner_map_fd);
     return false;
   }
+#else
+  struct bpf_map_info o = {0}; __u32 olen = sizeof(o);
+  if (bpf_obj_get_info_by_fd(services_v4_mapfd_, &o, &olen) < 0) {
+    return false;
+  }
+
+  int tmpl_fd = bpf_object__find_map_fd_by_name(filter_obj_, "peers_v4_inner_map");
+  struct bpf_map_info t = {0}; __u32 tlen = sizeof(t);
+  if (bpf_obj_get_info_by_fd(tmpl_fd, &t, &tlen) < 0) {
+    close(tmpl_fd);
+    return false;
+  }
+  close(tmpl_fd);
+
+  struct btf *btf = bpf_object__btf(filter_obj_);
+  int btf_fd = btf__fd(btf);
+
+  LIBBPF_OPTS(bpf_map_create_opts, opts,
+              .btf_fd = btf_fd,
+              .btf_key_type_id = t.btf_key_type_id,
+              .btf_value_type_id = t.btf_value_type_id,
+              .map_flags = (t.map_flags & ~BPF_F_INNER_MAP)
+          );
+  std::string map_name = "svc_ipv4_" + std::to_string(port);
+  int inner_map_fd = bpf_map_create(
+      (enum bpf_map_type)t.type, map_name.c_str(),
+      t.key_size, t.value_size, PER_SERVICE_MAX_CONNECTION, &opts);
+
+  if (inner_map_fd < 0) {
+    return false;
+  }
+
+  __u32 val_fd = (__u32)inner_map_fd;
+  auto ret = bpf_map_update_elem(services_v4_mapfd_, &port, &val_fd, BPF_ANY);
+  if (ret != 0)
+  {
+    close(inner_map_fd);
+    return false;
+  }
+
+#endif
   PortMapFdPair pair = { port, inner_map_fd, {} };
   services_mapfd_v4_list_.push_back(pair);
 
@@ -288,7 +418,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv6Port(uint16_t port)
   std::string map_name = "port_ipv6_" + std::to_string(port);
   int inner_map_fd = bpf_map_create(
       BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32),
-      sizeof(struct peer_value_v6), PER_SERVICE_MAX_CONNECTION, 0);
+      sizeof(struct peer_value_v6), PER_SERVICE_MAX_CONNECTION, nullptr);
   if (inner_map_fd < 0) {
     return false;
   }
@@ -523,6 +653,88 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemovePeerNode(
 }
 
 int
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadEgressFilterEbpf(
+    std::string_view ebpf_program_path)
+{
+  struct bpf_object *obj
+      = bpf_object__open_file(ebpf_program_path.data(), nullptr);
+  if (!obj) {
+    return false;
+  }
+
+  if (bpf_object__load(obj)) {
+    bpf_object__close(obj);
+    return false;
+  }
+
+  filter_obj_ = obj;
+  filter_prog_ = bpf_object__find_program_by_name(obj, "egress_filter");
+  if (!filter_prog_) {
+    bpf_object__close(obj);
+    return false;
+  }
+
+  int filter_prog_fd_ = bpf_program__fd(filter_prog_);
+  if (filter_prog_fd_ < 0) {
+    bpf_object__close(obj);
+    return false;
+  }
+
+  LIBBPF_OPTS(bpf_tc_hook, hook,
+              .ifindex = ifindex_,
+              .attach_point= BPF_TC_EGRESS,
+          );
+
+  int err = bpf_tc_hook_create(&hook);
+  if (err && err != -EEXIST) {
+    bpf_object__close(obj);
+    return false;
+  }
+
+  LIBBPF_OPTS(bpf_tc_opts, opts,
+              .prog_fd = filter_prog_fd_,
+              .flags = BPF_TC_F_REPLACE,
+              .handle = 1,
+              .priority = 1,
+          );
+
+  err = bpf_tc_attach(&hook, &opts);
+  if (err) {
+    bpf_tc_hook_destroy(&hook);
+    bpf_object__close(obj);
+    return false;
+  }
+
+  filter_map_fd_ = bpf_object__find_map_fd_by_name(obj, "filter_list");
+  if (filter_map_fd_ < 0) {
+    bpf_tc_detach(&hook, &opts);
+    bpf_tc_hook_destroy(&hook);
+    bpf_object__close(obj);
+    return false;
+  }
+
+  services_v4_mapfd_
+      = bpf_object__find_map_fd_by_name(obj, "services_v4_list");
+  if (services_v4_mapfd_ < 0) {
+    bpf_tc_detach(&hook, &opts);
+    bpf_tc_hook_destroy(&hook);
+    bpf_object__close(obj);
+    return false;
+  }
+
+  services_v6_mapfd_
+      = bpf_object__find_map_fd_by_name(obj, "services_v6_list");
+  if (services_v6_mapfd_ < 0) {
+    bpf_tc_detach(&hook, &opts);
+    bpf_tc_hook_destroy(&hook);
+    bpf_object__close(obj);
+    return false;
+  }
+
+  return true;
+}
+
+int
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilterEbpf(
     std::string_view ebpf_program_path)
 {
@@ -557,7 +769,6 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilterEbpf(
 
   filter_map_fd_ = bpf_object__find_map_fd_by_name(obj, "filter_list");
   if (filter_map_fd_ < 0) {
-    fprintf(stderr, "Failed to find map fd by name\n");
     bpf_object__close(obj);
     return false;
   }
@@ -565,14 +776,12 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilterEbpf(
   services_v4_mapfd_
       = bpf_object__find_map_fd_by_name(obj, "services_v4_list");
   if (services_v4_mapfd_ < 0) {
-    fprintf(stderr, "Failed to find services_v4_list map fd\n");
     bpf_object__close(obj);
     return false;
   }
   services_v6_mapfd_
       = bpf_object__find_map_fd_by_name(obj, "services_v6_list");
   if (services_v6_mapfd_ < 0) {
-    fprintf(stderr, "Failed to find services_v6_list map fd\n");
     bpf_object__close(obj);
     return false;
   }
@@ -649,7 +858,7 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
   stream_.assign(fd);
 
   pImpl_->Initialize(intl_name, [this](int prog_fd) {
-    if (ioctl(this->stream_.native_handle(), TUNSETFILTEREBPF, prog_fd) < 0)
+    if (ioctl(this->stream_.native_handle(), TUNSETFILTEREBPF, &prog_fd) < 0)
       return false;
     return true;
   });
@@ -662,7 +871,7 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
                                  const asio::ip::address_v4 &addr)
     : TunGnuLinuxImpl(ex, intl_name)
 {
-  pImpl_->AddIpv4Address(addr);
+  pImpl_->SetIpv4AddressPeer(addr);
 }
 
 bool
