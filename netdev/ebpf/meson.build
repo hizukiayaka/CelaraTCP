@@ -1,7 +1,6 @@
 ebpf_sources = ['steering_multiq.bpf.c',
   'xmit_filter.bpf.c',
-  'xdp_tcp_filter.bpf.c',
-  'xdp_test.bpf.c',
+  'tun_egress.bpf.c',
   ]  # List of eBPF source files
 
 ebpf_obj_dir = join_paths(get_option('prefix'), get_option('libdir'),
