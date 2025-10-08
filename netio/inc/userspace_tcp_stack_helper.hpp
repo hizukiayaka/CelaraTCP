@@ -7,6 +7,8 @@
 #define USERSPACE_TCP_STACK_HELPER_HPP_
 
 #include <asio/experimental/concurrent_channel.hpp>
+#include <iostream>
+#include <memory>
 #include <recycle/shared_pool.hpp>
 #include <utility>
 
@@ -114,31 +116,85 @@ public:
   bool
   FilterIncomingPacket(NetPacket &packet) const
   {
+    auto print_reject
+        = [](const char *reason, int proto, uint16_t port,
+             const asio::ip::address &src, const asio::ip::address &dst) {
+            std::string proto_name;
+            switch (proto) {
+            case IPPROTO_TCP:
+              proto_name = "TCP";
+              break;
+            case IPPROTO_UDP:
+              proto_name = "UDP";
+              break;
+            case IPPROTO_ICMP:
+              proto_name = "ICMP";
+              break;
+            default:
+              proto_name = std::format("Unknown {:#0x}", proto);
+              break;
+            }
+
+            std::stringstream ss;
+            ss << "[Filter] Rejected packet: " << reason
+               << ", protocol=" << proto << " (" << proto_name << ")"
+               << ", src=" << src.to_string() << ":" << port
+               << ", dst=" << dst.to_string() << ":" << port;
+
+            std::cerr << ss.str() << "\n";
+          };
+
     if constexpr (std::is_same_v<AddrType, asio::ip::address_v4>) {
       if (packet.GetUsedBytes() < (kIpv4HdrSize + kTcpHdrMinimalSize)) {
+        print_reject("IPv4: too short", -1, 0, asio::ip::address_v4::any(),
+                     asio::ip::address_v4::any());
         return false;
       }
       auto data = packet.GetData().data();
       if (data[0] != 0x45) {
+        print_reject("IPv4: wrong version/IHL", data[0], 0,
+                     asio::ip::address_v4::any(), asio::ip::address_v4::any());
         return false;
       }
+      uint16_t src_port = ntohs(*(uint16_t *)(data + 20));
+      uint16_t dst_port = ntohs(*(uint16_t *)(data + 22));
+      asio::ip::address_v4 src_addr(ntohl(*(uint32_t *)(data + 12)));
+      asio::ip::address_v4 dst_addr(ntohl(*(uint32_t *)(data + 16)));
       if (data[9] != IPPROTO_TCP) {
+        print_reject("IPv4: not TCP", data[9], dst_port, src_addr, dst_addr);
         return false;
       }
     } else if constexpr (std::is_same_v<AddrType, asio::ip::address_v6>) {
       if (packet.GetUsedBytes() < (kIpv6HdrSize + kTcpHdrMinimalSize)) {
+        print_reject("IPv6: too short", -1, 0, asio::ip::address_v6::any(),
+                     asio::ip::address_v6::any());
         return false;
       }
       auto data = packet.GetData().data();
       if (data[0] != 0x60) {
+        print_reject("IPv6: wrong version", -1, 0, asio::ip::address_v6::any(),
+                     asio::ip::address_v6::any());
         return false;
       }
+      uint16_t src_port = ntohs(*(uint16_t *)(data + 4));
+      uint16_t dst_port = ntohs(*(uint16_t *)(data + 6));
+      std::array<unsigned char, 16> src_bytes;
+      std::memcpy(src_bytes.data(), data + 8, 16);
+      asio::ip::address_v6 src_addr (src_bytes, 0);
+
+      std::array<unsigned char, 16> dst_bytes;
+      std::memcpy(dst_bytes.data(), data + 24, 16);
+      asio::ip::address_v6 dst_addr (dst_bytes, 0);
       if (data[6] != IPPROTO_TCP) {
+        print_reject("IPv6: not TCP", data[6], dst_port, src_addr, dst_addr);
         return false;
       }
     } else {
+      print_reject("Unknown address type", -1, 0, asio::ip::address_v4(),
+                   asio::ip::address_v4());
       return false;
     }
+    std::cout << "Pass" << std::endl;
     return true;
   }
 
