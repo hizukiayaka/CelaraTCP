@@ -163,9 +163,13 @@ NetIncoming(auto netio, auto &tcp_stack)
       if (pkt_size >= 0) {
         hdr->SetUsedBytes(kHdrSize);
         pkt->SetUsedBytes(pkt_size);
-        auto state = co_await tcp_stack.ProcessIncomingPackets(chunks);
-
-        break;
+        auto ret = tcp_stack.FilterIncomingPacket(*hdr);
+        if (ret){
+            auto state = co_await tcp_stack.ProcessIncomingPackets(chunks);
+            break;
+        } else {
+            std::cout << "Packet dropped by filter\n";
+        }
       }
       /* read again */
     }
@@ -226,9 +230,15 @@ main(int argc, char *argv[])
 
   auto filter_list = filter->GetSupportFilterType();
 
+#if 0
   std::list<netdev::NetDevFiltertype> apply_filters
       = { netdev::NetDevFiltertype::DROP_IPV6,
           netdev::NetDevFiltertype::ACCEPT_4_TUPLE };
+#else
+  std::list<netdev::NetDevFiltertype> apply_filters
+      = { netdev::NetDevFiltertype::DROP_IPV6,
+          netdev::NetDevFiltertype::DROP_UDP };
+#endif
 
   auto all_supported = std::all_of(
       apply_filters.cbegin(), apply_filters.cend(),
@@ -238,7 +248,10 @@ main(int argc, char *argv[])
       });
 
   if (all_supported) {
-    filter->LoadFilter();
+    if (!filter->LoadFilter()) {
+      std::cerr << "Error: Failed to load the packet filter.\n";
+      return 1;
+    }
     filter->SetNetDevFilterType(apply_filters);
   } else {
     std::cerr
@@ -279,11 +292,12 @@ main(int argc, char *argv[])
 
   asio::co_spawn(exec, NetIncoming(netdev, tcp_stack), asio::detached);
 
-  filter->AddWatchIpv4Port(tcp_port);
+  //filter->AddWatchIpv4Port(tcp_port);
+  netdev->Up();
 
   ioc.run();
 
-  filter->RemoveWatchIpv4Port(tcp_port);
+  //filter->RemoveWatchIpv4Port(tcp_port);
 
   return 0;
 }
