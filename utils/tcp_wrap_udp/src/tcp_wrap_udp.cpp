@@ -12,6 +12,7 @@
 #include <getopt.h>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include "net_packet_allocator.hpp"
 #include "userspace_tcp_stack_helper.hpp"
@@ -81,11 +82,22 @@ public:
       : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk> >(
             local_addr, local_port, remote_addr, remote_port, ex),
         ex_(ex), nout_(std::move(net_io)), udp_port_(udp_port),
-        local_port_(local_port), chan_tx_(ex_, 32), udp_socket_(ex_)
+        local_port_(local_port), chan_tx_(ex_, 32), udp_socket_(ex_),
+        hdr_alloc_(kIpv4HdrSize + kTcpHdrMinimalSize),
+        payload_alloc_(kRegularMtu - kIpv4HdrSize - kTcpHdrMinimalSize)
   {
+#if 0
     netdev::IPacketFilter *filter = *nout_;
     filter->AddPeerNode(this->remote_addr_, this->remote_port_, local_port_);
+#endif
 
+    tcp_hdr_pool_ = std::make_shared<pool_t>(
+        [this]() { return this->hdr_alloc_.Allocation(); });
+
+    tx_payload_pool_ = std::make_shared<pool_t>(
+        [this]() { return this->payload_alloc_.Allocation(); });
+
+    tcp_hdr_pool_->reserve(20);
     tx_payload_pool_->reserve(20);
   }
 
@@ -94,9 +106,11 @@ public:
 
   ~TcpUdpSession()
   {
+#if 0
     netdev::IPacketFilter *filter = *nout_;
     filter->RemovePeerNode(this->remote_addr_, this->remote_port_,
                            local_port_);
+#endif
   }
 
   virtual void
@@ -110,7 +124,7 @@ public:
 
     asio::co_spawn(ex_, tcp_receiver(), asio::detached);
     asio::co_spawn(ex_, udp_receiver(), asio::detached);
-    asio::co_spawn(ex_, udp_forward_tcp(tx_hdr_pool_, chan_tx_),
+    asio::co_spawn(ex_, udp_forward_tcp(tcp_hdr_pool_, chan_tx_),
                    asio::detached);
   }
 
@@ -120,28 +134,31 @@ private:
   uint_fast16_t udp_port_;
   uint_fast16_t local_port_;
 
-  std::shared_ptr<pool_t> tx_hdr_pool_;
-  std::shared_ptr<pool_t> tx_payload_pool_;
-
   asio::experimental::channel<void(asio::error_code,
                                    std::shared_ptr<NetMemChunk>)>
       chan_tx_;
 
   asio::ip::udp::socket udp_socket_;
+
+  memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc_;
+  memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc_;
+
+  std::shared_ptr<pool_t> tcp_hdr_pool_;
+  std::shared_ptr<pool_t> tx_payload_pool_;
 };
 
 asio::awaitable<void>
 NetIncoming(auto netio, auto &tcp_stack)
 {
   constexpr auto kHdrSize = kIpv4HdrSize + kTcpHdrMinimalSize;
-  memmanger::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kHdrSize);
+  memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kHdrSize);
   std::shared_ptr<recycle::shared_pool<NetMemChunk> > hdr_pool
       = std::make_shared<recycle::shared_pool<NetMemChunk> >(
           [&hdr_alloc]() { return hdr_alloc.Allocation(); });
   hdr_pool->reserve(20);
 
-  memmanger::SimpleHeapAllocator<NetMemChunk> payload_alloc(kRegularMtu
-                                                            - kHdrSize);
+  memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc(kRegularMtu
+                                                             - kHdrSize);
   std::shared_ptr<recycle::shared_pool<NetMemChunk> > payload_pool
       = std::make_shared<recycle::shared_pool<NetMemChunk> >(
           [&payload_alloc]() { return payload_alloc.Allocation(); });
@@ -164,11 +181,10 @@ NetIncoming(auto netio, auto &tcp_stack)
         hdr->SetUsedBytes(kHdrSize);
         pkt->SetUsedBytes(pkt_size);
         auto ret = tcp_stack.FilterIncomingPacket(*hdr);
-        if (ret){
-            auto state = co_await tcp_stack.ProcessIncomingPackets(chunks);
-            break;
-        } else {
-            std::cout << "Packet dropped by filter\n";
+        if (ret) {
+          auto state
+              = co_await tcp_stack.ProcessIncomingPackets(std::move(chunks));
+          break;
         }
       }
       /* read again */
@@ -230,15 +246,9 @@ main(int argc, char *argv[])
 
   auto filter_list = filter->GetSupportFilterType();
 
-#if 0
-  std::list<netdev::NetDevFiltertype> apply_filters
-      = { netdev::NetDevFiltertype::DROP_IPV6,
-          netdev::NetDevFiltertype::ACCEPT_4_TUPLE };
-#else
   std::list<netdev::NetDevFiltertype> apply_filters
       = { netdev::NetDevFiltertype::DROP_IPV6,
           netdev::NetDevFiltertype::DROP_UDP };
-#endif
 
   auto all_supported = std::all_of(
       apply_filters.cbegin(), apply_filters.cend(),
@@ -260,8 +270,8 @@ main(int argc, char *argv[])
     return 1;
   }
 
-  memmanger::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kIpv4HdrSize
-                                                        + kTcpHdrMinimalSize);
+  memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kIpv4HdrSize
+                                                         + kTcpHdrMinimalSize);
   std::shared_ptr<recycle::shared_pool<NetMemChunk> > hdr_pool
       = std::make_shared<recycle::shared_pool<NetMemChunk> >(
           [&hdr_alloc]() { return hdr_alloc.Allocation(); });
@@ -292,12 +302,16 @@ main(int argc, char *argv[])
 
   asio::co_spawn(exec, NetIncoming(netdev, tcp_stack), asio::detached);
 
-  //filter->AddWatchIpv4Port(tcp_port);
+  // filter->AddWatchIpv4Port(tcp_port);
   netdev->Up();
 
-  ioc.run();
+  std::thread t1([&ioc]() { ioc.run(); });
+  std::thread t2([&ioc]() { ioc.run(); });
 
-  //filter->RemoveWatchIpv4Port(tcp_port);
+  t2.join();
+  t1.join();
+
+  // filter->RemoveWatchIpv4Port(tcp_port);
 
   return 0;
 }
