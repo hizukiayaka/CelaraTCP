@@ -231,3 +231,15 @@ WhitespaceSensitiveMacros:
   - NS_SWIFT_NAME
   - PP_STRINGIZE
   - STRINGIZE
+---
+Language:        C
+BasedOnStyle:    LLVM
+UseTab:          ForIndentation
+IndentWidth:     8
+TabWidth:        8
+ColumnLimit:     80
+BreakBeforeBraces: Attach   # K&R style for kernel/ebpf
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+IndentCaseLabels: false
+SortIncludes:    false
