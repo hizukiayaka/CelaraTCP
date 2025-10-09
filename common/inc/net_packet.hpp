@@ -16,7 +16,7 @@ constexpr uint_fast16_t kRegularMtu = 1500;
 constexpr uint_fast16_t kPPPoEMtu = 1492;
 constexpr uint_fast16_t kIpv4HdrSize = 20;
 constexpr uint_fast16_t kIpv6HdrSize = 40;
-constexpr uint_fast16_t kTcpHdrMinimalSize = 18;
+constexpr uint_fast16_t kTcpHdrMinimalSize = 20;
 constexpr uint_fast16_t kUdpHdrSize = 8;
 constexpr uint_fast16_t kUdp6Payload = kRegularMtu - kIpv6HdrSize - 8;
 
