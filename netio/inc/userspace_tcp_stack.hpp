@@ -180,7 +180,7 @@ protected:
     }
 
     auto data = hdr.GetData();
-    std::copy(ip_hdr_tmpl_.begin(), ip_hdr_tmpl_.end(), data.begin());
+    std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), data.begin());
 
     // Total Length
     *reinterpret_cast<uint16_t *>(data.data() + 2)
@@ -258,7 +258,7 @@ protected:
       return false;
     }
     auto data = hdr.GetData();
-    std::copy(ip_hdr_tmpl_.begin(), ip_hdr_tmpl_.end(), data.begin());
+    std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), data.begin());
 
     // Payload Length
     *reinterpret_cast<uint16_t *>(data.data() + 4)
@@ -313,12 +313,11 @@ public:
 
     // Window size
     *reinterpret_cast<uint16_t *>(data + 14) = kTcpWindowNetworkOrder;
-#if 0
     // Checksum
     *reinterpret_cast<uint16_t *>(data + 16) = 0;
     // Urgent pointer
     *reinterpret_cast<uint16_t *>(data + 18) = 0;
-#endif
+
     if constexpr (Policy != CheckSumPolicy::None) {
       addr_sum_for_checksum_ = SrcDstAddrInternetSum(l_addr_nd, r_addr_nd);
       partial_sum_for_checksum_ = TcpPseudoPartialSum(addr_sum_for_checksum_);
@@ -425,7 +424,7 @@ public:
     auto ip_hdr_size = hdr.GetUsedBytes();
 
     auto tcp = hdr.GetData().subspan(hdr.GetUsedBytes());
-    std::copy(tcp_hdr_tmpl_.begin(), tcp_hdr_tmpl_.end(), tcp.begin());
+    std::copy(tcp_hdr_tmpl_.cbegin(), tcp_hdr_tmpl_.cend(), tcp.begin());
     auto data = tcp.data();
 
     uint32_t seq, ack;
