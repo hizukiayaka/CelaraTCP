@@ -6,7 +6,7 @@
 #include <asio.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
-#include <asio/experimental/channel.hpp>
+#include <asio/experimental/concurrent_channel.hpp>
 #include <condition_variable>
 #include <cstdlib>
 #include <getopt.h>
@@ -55,7 +55,7 @@ private:
 
   asio::awaitable<void>
   udp_forward_tcp(std::shared_ptr<pool_t> hdr_pool,
-                  asio::experimental::channel<void(
+                  asio::experimental::concurrent_channel<void(
                       asio::error_code, std::shared_ptr<NetMemChunk>)> &chan)
   {
     for (;;) {
@@ -74,31 +74,30 @@ private:
   }
 
 public:
+  /**
+   * tx_hdr_pool would be used for filling IP + TCP header, so CPU would
+   * write it then netio would read it.
+   * tx_payload_pool is used for sending payload, UDP socket would write
+   * to it then netio would read it.
+   */
   explicit TcpUdpSession(const AddrType &local_addr, uint_fast16_t local_port,
                          const AddrType &remote_addr,
-                         uint_fast16_t remote_port, asio::any_io_executor &ex,
+                         uint_fast16_t remote_port,
+                         asio::any_io_executor &ex,
                          std::shared_ptr<NetworkIOObjectT> net_io,
-                         uint_fast16_t udp_port)
+                         uint_fast16_t udp_port,
+                         std::shared_ptr<pool_t> tx_hdr_pool,
+                         std::shared_ptr<pool_t> tx_payload_pool)
       : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk> >(
             local_addr, local_port, remote_addr, remote_port, ex),
         ex_(ex), nout_(std::move(net_io)), udp_port_(udp_port),
         local_port_(local_port), chan_tx_(ex_, 32), udp_socket_(ex_),
-        hdr_alloc_(kIpv4HdrSize + kTcpHdrMinimalSize),
-        payload_alloc_(kRegularMtu - kIpv4HdrSize - kTcpHdrMinimalSize)
+        tcp_hdr_pool_(tx_hdr_pool), tx_payload_pool_(tx_payload_pool)
   {
 #if 0
     netdev::IPacketFilter *filter = *nout_;
     filter->AddPeerNode(this->remote_addr_, this->remote_port_, local_port_);
 #endif
-
-    tcp_hdr_pool_ = std::make_shared<pool_t>(
-        [this]() { return this->hdr_alloc_.Allocation(); });
-
-    tx_payload_pool_ = std::make_shared<pool_t>(
-        [this]() { return this->payload_alloc_.Allocation(); });
-
-    tcp_hdr_pool_->reserve(20);
-    tx_payload_pool_->reserve(20);
   }
 
   TcpUdpSession(TcpUdpSession &&) = default;
@@ -116,7 +115,7 @@ public:
   virtual void
   Established() override
   {
-    asio::ip::udp::endpoint dest(asio::ip::address_v6::from_string("::1"),
+    asio::ip::udp::endpoint dest(asio::ip::make_address_v6("::1"),
                                  udp_port_);
 
     udp_socket_.open(asio::ip::udp::v6());
@@ -134,36 +133,23 @@ private:
   uint_fast16_t udp_port_;
   uint_fast16_t local_port_;
 
-  asio::experimental::channel<void(asio::error_code,
-                                   std::shared_ptr<NetMemChunk>)>
+  asio::experimental::concurrent_channel<void(asio::error_code,
+                                              std::shared_ptr<NetMemChunk>)>
       chan_tx_;
 
   asio::ip::udp::socket udp_socket_;
-
-  memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc_;
-  memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc_;
 
   std::shared_ptr<pool_t> tcp_hdr_pool_;
   std::shared_ptr<pool_t> tx_payload_pool_;
 };
 
+/*
+ * the allocated buf from hdr_pool and payload_pool should be
+ * able to be written by the netio.
+ */
 asio::awaitable<void>
-NetIncoming(auto netio, auto &tcp_stack)
+NetIncoming(auto netio, auto &tcp_stack, auto hdr_pool, auto payload_pool)
 {
-  constexpr auto kHdrSize = kIpv4HdrSize + kTcpHdrMinimalSize;
-  memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kHdrSize);
-  std::shared_ptr<recycle::shared_pool<NetMemChunk> > hdr_pool
-      = std::make_shared<recycle::shared_pool<NetMemChunk> >(
-          [&hdr_alloc]() { return hdr_alloc.Allocation(); });
-  hdr_pool->reserve(20);
-
-  memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc(kRegularMtu
-                                                             - kHdrSize);
-  std::shared_ptr<recycle::shared_pool<NetMemChunk> > payload_pool
-      = std::make_shared<recycle::shared_pool<NetMemChunk> >(
-          [&payload_alloc]() { return payload_alloc.Allocation(); });
-  payload_pool->reserve(20);
-
   for (;;) {
     auto hdr = hdr_pool->allocate();
     auto pkt = payload_pool->allocate();
@@ -172,20 +158,17 @@ NetIncoming(auto netio, auto &tcp_stack)
         = { hdr->GetMutableBuf(), pkt->GetMutableBuf() };
     std::forward_list<std::shared_ptr<NetMemChunk> > chunks = { hdr, pkt };
 
+    const auto hdr_size = hdr->GetMaximumSize();
     for (;;) {
-      auto bytes
-          = co_await asio::async_read(*netio, bufs, asio::use_awaitable);
-      auto pkt_size = bytes - kHdrSize;
+      auto bytes = co_await netio->async_read_some(bufs, asio::use_awaitable);
+      auto pkt_size = bytes - hdr_size;
 
       if (pkt_size >= 0) {
-        hdr->SetUsedBytes(kHdrSize);
+        hdr->SetUsedBytes(hdr_size);
         pkt->SetUsedBytes(pkt_size);
-        auto ret = tcp_stack.FilterIncomingPacket(*hdr);
-        if (ret) {
-          auto state
-              = co_await tcp_stack.ProcessIncomingPackets(std::move(chunks));
-          break;
-        }
+        auto state
+            = co_await tcp_stack.ProcessIncomingPackets(std::move(chunks));
+        break;
       }
       /* read again */
     }
@@ -238,7 +221,7 @@ main(int argc, char *argv[])
   asio::io_context ioc;
   asio::any_io_executor exec = ioc.get_executor();
 
-  auto local_addr = asio::ip::address_v4::from_string(address);
+  auto local_addr = asio::ip::make_address_v4(address);
 
   auto netdev = std::make_shared<netdev::VirtualNetDev>(exec, interface_name,
                                                         local_addr);
@@ -270,22 +253,29 @@ main(int argc, char *argv[])
     return 1;
   }
 
-  memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kIpv4HdrSize
-                                                         + kTcpHdrMinimalSize);
+  constexpr auto kHdrSize = kIpv4HdrSize + kTcpHdrMinimalSize;
+  memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kHdrSize);
   std::shared_ptr<recycle::shared_pool<NetMemChunk> > hdr_pool
       = std::make_shared<recycle::shared_pool<NetMemChunk> >(
           [&hdr_alloc]() { return hdr_alloc.Allocation(); });
-  hdr_pool->reserve(20);
+  hdr_pool->reserve(40);
 
-  auto conn_factory
-      = [&exec, &netdev, &udp_port](const asio::ip::address_v4 &local_addr,
-                                    uint_fast16_t local_port,
-                                    const asio::ip::address_v4 &remote_addr,
-                                    uint_fast16_t remote_port) {
-          return TcpUdpSession<asio::ip::address_v4, netdev::VirtualNetDev>(
-              local_addr, local_port, remote_addr, remote_port, exec, netdev,
-              udp_port);
-        };
+  memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc(kRegularMtu
+                                                            - kHdrSize);
+  std::shared_ptr<recycle::shared_pool<NetMemChunk> > payload_pool
+      = std::make_shared<recycle::shared_pool<NetMemChunk> >(
+          [&payload_alloc]() { return payload_alloc.Allocation(); });
+  payload_pool->reserve(40);
+
+  auto conn_factory = [&exec, &netdev, &udp_port, &hdr_pool,
+                       &payload_pool](const asio::ip::address_v4 &local_addr,
+                                      uint_fast16_t local_port,
+                                      const asio::ip::address_v4 &remote_addr,
+                                      uint_fast16_t remote_port) {
+    return TcpUdpSession<asio::ip::address_v4, netdev::VirtualNetDev>(
+        local_addr, local_port, remote_addr, remote_port, exec, netdev,
+        udp_port, hdr_pool, payload_pool);
+  };
 
   auto serv_factory = [&conn_factory](const asio::ip::address_v4 &local_addr,
                                       uint_fast16_t local_port) {
@@ -300,7 +290,8 @@ main(int argc, char *argv[])
   auto service = serv_factory(local_addr, tcp_port);
   tcp_stack.AddService(service);
 
-  asio::co_spawn(exec, NetIncoming(netdev, tcp_stack), asio::detached);
+  asio::co_spawn(exec, NetIncoming(netdev, tcp_stack, hdr_pool, payload_pool),
+                 asio::detached);
 
   // filter->AddWatchIpv4Port(tcp_port);
   netdev->Up();
