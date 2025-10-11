@@ -21,9 +21,10 @@
 using namespace celaratcp;
 using namespace celaratcp::netio;
 
-template <typename AddrType, typename NetworkIOObjectT>
+template <typename AddrType, typename NetworkIOObjectT,
+          CheckSumPolicy Policy = CheckSumPolicy::IP_TCP>
 class TcpUdpSession
-    : public TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk> >
+    : public TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>, Policy>
 {
 private:
   using pool_t = recycle::shared_pool<NetMemChunk>;
@@ -62,8 +63,8 @@ private:
       auto pkt = co_await chan.async_receive(asio::use_awaitable);
       auto hdr = hdr_pool->allocate();
 
-      TcpConnection<AddrType>::FillPacketIpTcpHdr(TcpPacketType::ACK, *hdr,
-                                                  pkt);
+      TcpConnection<AddrType, Policy>::FillPacketIpTcpHdr(TcpPacketType::ACK,
+                                                          *hdr, pkt);
       std::list<asio::const_buffer> bufs
           = { hdr->GetConstBuf(), pkt->GetConstBuf() };
 
@@ -82,13 +83,12 @@ public:
    */
   explicit TcpUdpSession(const AddrType &local_addr, uint_fast16_t local_port,
                          const AddrType &remote_addr,
-                         uint_fast16_t remote_port,
-                         asio::any_io_executor &ex,
+                         uint_fast16_t remote_port, asio::any_io_executor &ex,
                          std::shared_ptr<NetworkIOObjectT> net_io,
                          uint_fast16_t udp_port,
                          std::shared_ptr<pool_t> tx_hdr_pool,
                          std::shared_ptr<pool_t> tx_payload_pool)
-      : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk> >(
+      : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>, Policy>(
             local_addr, local_port, remote_addr, remote_port, ex),
         ex_(ex), nout_(std::move(net_io)), udp_port_(udp_port),
         local_port_(local_port), chan_tx_(ex_, 32), udp_socket_(ex_),
@@ -115,8 +115,7 @@ public:
   virtual void
   Established() override
   {
-    asio::ip::udp::endpoint dest(asio::ip::make_address_v6("::1"),
-                                 udp_port_);
+    asio::ip::udp::endpoint dest(asio::ip::make_address_v6("::1"), udp_port_);
 
     udp_socket_.open(asio::ip::udp::v6());
     udp_socket_.connect(dest);
@@ -287,7 +286,8 @@ main(int argc, char *argv[])
   auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(netdev, hdr_pool,
                                                            serv_factory);
 
-  auto service = serv_factory(local_addr, tcp_port);
+  auto peer_addr = netdev->GetIPv4PeerAddress();
+  auto service = serv_factory(peer_addr, tcp_port);
   tcp_stack.AddService(service);
 
   asio::co_spawn(exec, NetIncoming(netdev, tcp_stack, hdr_pool, payload_pool),
