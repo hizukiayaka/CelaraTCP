@@ -118,7 +118,11 @@ protected:
 
   std::chrono::time_point<std::chrono::steady_clock> last_activity_;
 
-  uint_fast32_t addr_sum_for_checksum_;
+  /**
+   * included pseudo IP header sum(TCP seg len is not included),
+   * TCP src and dest port fields,
+   * data offset, reserved, window size fields
+   */
   uint_fast32_t partial_sum_for_checksum_;
 
 protected:
@@ -133,11 +137,11 @@ protected:
   }
 
   static uint_fast32_t
-  TcpSegPartialSum(uint_fast16_t lport_ND, uint_fast16_t rport_ND)
+  TcpSegPartialSum(uint_fast16_t lport, uint_fast16_t rport)
   {
-    uint_fast32_t sum = lport_ND + rport_ND;
-    sum += (kTcpDOffsetRsrvd << 8);
-    sum += kTcpWindowNetworkOrder;
+    uint_fast32_t sum = lport + rport;
+    sum += static_cast<uint_fast32_t>(kTcpDOffsetRsrvd << 8);
+    sum += ntohs(kTcpWindowNetworkOrder);
 
     return sum;
   }
@@ -191,11 +195,9 @@ protected:
     if constexpr (Policy == CheckSumPolicy::IP
                   || Policy == CheckSumPolicy::IP_TCP)
     {
-      static_assert(
-          false, "I don't think any one need this, I have not implement it");
-    } else {
-      // clear checksum
-      *reinterpret_cast<uint16_t *>(data.data() + 10) = 0;
+      uint16_t csum
+          = InternetChecksum(std::span<uint8_t>(data.data(), kIpv4HdrSize));
+      *reinterpret_cast<uint16_t *>(data.data() + 10) = htons(csum);
     }
 
     hdr.SetUsedBytes(kIpv4HdrSize);
@@ -293,8 +295,7 @@ public:
                 const AddrType &remote_addr, uint_fast16_t remote_port)
       : state_(TcpConnectionState::LISTEN), remote_addr_(remote_addr),
         remote_port_(remote_port), ip_hdr_tmpl_{}, tcp_hdr_tmpl_{},
-        sequenceN(0), ackN(0), addr_sum_for_checksum_(0),
-        partial_sum_for_checksum_(0)
+        sequenceN(0), ackN(0), partial_sum_for_checksum_(0)
   {
     typename AddrType::bytes_type l_addr_nd{ local_addr.to_bytes() };
     typename AddrType::bytes_type r_addr_nd{ remote_addr.to_bytes() };
@@ -319,9 +320,11 @@ public:
     *reinterpret_cast<uint16_t *>(data + 18) = 0;
 
     if constexpr (Policy != CheckSumPolicy::None) {
-      addr_sum_for_checksum_ = SrcDstAddrInternetSum(l_addr_nd, r_addr_nd);
-      partial_sum_for_checksum_ = TcpPseudoPartialSum(addr_sum_for_checksum_);
-      partial_sum_for_checksum_ += TcpSegPartialSum(lport_nd, rport_nd);
+      uint32_t addr_sum_for_checksum
+          = SrcDstAddrInternetSum(l_addr_nd, r_addr_nd);
+      partial_sum_for_checksum_ = TcpPseudoPartialSum(addr_sum_for_checksum);
+      /* TCP header part */
+      partial_sum_for_checksum_ += TcpSegPartialSum(local_port, remote_port);
     }
   }
 
@@ -462,23 +465,26 @@ public:
 
     if constexpr (Policy != CheckSumPolicy::None) {
       uint32_t tcp_sum = partial_sum_for_checksum_;
-      // FIXME: Pseudo header part Upper layer length
-      // tcp_sum += (kTcpHdrMinimalSize + payload_size)
+      const std::size_t payload_size = payload ? payload->GetUsedBytes() : 0;
+      tcp_sum += kTcpHdrMinimalSize + payload_size;
 
       // NOTE: the left Tcp Segment part here
-      tcp_sum += htonl(seq);
-      tcp_sum += htonl(ack);
-      tcp_sum += data[13];
+      tcp_sum += static_cast<uint16_t>(seq >> 16);
+      tcp_sum += static_cast<uint16_t>(seq & 0xFFFF);
+
+      tcp_sum += static_cast<uint16_t>(ack >> 16);
+      tcp_sum += static_cast<uint16_t>(ack & 0xFFFF);
+
+      tcp_sum += static_cast<uint_fast32_t>(data[13]);
 
       if (payload) {
         auto tcp_checksum = InternetChecksum(payload->GetData(), tcp_sum);
-        *reinterpret_cast<uint16_t *>(data + 16) = tcp_checksum;
+        *reinterpret_cast<uint16_t *>(data + 16) = htons(tcp_checksum);
       } else {
-        while (tcp_sum > UINT16_MAX) {
-          tcp_sum = (tcp_sum & UINT16_MAX) + (tcp_sum >> 16);
-        }
+        tcp_sum = (tcp_sum & 0xFFFF) + (tcp_sum >> 16);
+        tcp_sum = (tcp_sum & 0xFFFF) + (tcp_sum >> 16);
         *reinterpret_cast<uint16_t *>(data + 16)
-            = static_cast<uint16_t>(~tcp_sum);
+            = htons(static_cast<uint16_t>(~tcp_sum));
       }
     }
 

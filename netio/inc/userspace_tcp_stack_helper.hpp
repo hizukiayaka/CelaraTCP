@@ -55,8 +55,8 @@ public:
   TcpConnectionChan(AddrType local_addr, uint_fast16_t local_port,
                     AddrType remote_addr, uint_fast16_t remote_port,
                     asio::any_io_executor &ex)
-      : TcpConnection<AddrType>(local_addr, local_port, remote_addr,
-                                remote_port),
+      : TcpConnection<AddrType, Policy>(local_addr, local_port, remote_addr,
+                                        remote_port),
         rx_chan_(ex, 32)
   {
   }
@@ -180,11 +180,11 @@ public:
       uint16_t dst_port = ntohs(*(uint16_t *)(data + 6));
       std::array<unsigned char, 16> src_bytes;
       std::memcpy(src_bytes.data(), data + 8, 16);
-      asio::ip::address_v6 src_addr (src_bytes, 0);
+      asio::ip::address_v6 src_addr(src_bytes, 0);
 
       std::array<unsigned char, 16> dst_bytes;
       std::memcpy(dst_bytes.data(), data + 24, 16);
-      asio::ip::address_v6 dst_addr (dst_bytes, 0);
+      asio::ip::address_v6 dst_addr(dst_bytes, 0);
       if (data[6] != IPPROTO_TCP) {
         print_reject("IPv6: not TCP", data[6], dst_port, src_addr, dst_addr);
         return false;

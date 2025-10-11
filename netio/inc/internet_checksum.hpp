@@ -4,29 +4,43 @@
  */
 #pragma once
 
-#include <cstdint>
+#include <cstddef>
+#include <cstring>
 #include <iterator>
 #include <type_traits>
+
+template <typename Container>
+inline const uint8_t *
+as_bytes_ptr(const Container &c)
+{
+  return reinterpret_cast<const uint8_t *>(std::data(c));
+}
+
+template <typename Container>
+inline std::size_t
+as_bytes_len(const Container &c)
+{
+  return std::size(c) * sizeof(typename Container::value_type);
+}
 
 template <typename Container>
 uint_fast32_t
 InternetSum(const Container &buffer)
 {
-  // Ensure the container holds elements of integral type
-  static_assert(std::is_integral_v<typename Container::value_type>,
-                "Container must hold integral elements");
+  const uint8_t *p = as_bytes_ptr(buffer);
+  std::size_t len = as_bytes_len(buffer);
+  uint_fast32_t sum = 0;
 
-  uint_fast32_t sum = 0; // Use uint32_t for the sum
+  // Process all bytes as 16-bit network-order words
+  for (std::size_t i = 0; i < len - 1; i += 2) {
+    // This correctly builds a 16-bit word in network byte order
+    sum += (static_cast<uint_fast32_t>(p[i]) << 8)
+           | static_cast<uint_fast32_t>(p[i + 1]);
+  }
 
-  // Iterate over the container and process each element
-  for (const auto &element : buffer) {
-    // Break the element into 8-bit chunks and add them to the sum
-    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&element);
-    for (std::size_t i = 0; i < sizeof(element); ++i) {
-      sum += bytes[i] << ((i % 2 == 0)
-                              ? 8
-                              : 0); // Alternate between high and low bytes
-    }
+  // Handle odd byte if present (pad with zero in low byte)
+  if (len % 2) {
+    sum += static_cast<uint_fast32_t>(p[len - 1]) << 8;
   }
 
   return sum;
@@ -36,25 +50,13 @@ template <typename Container>
 uint16_t
 InternetChecksum(const Container &buffer, uint_fast32_t sum = 0)
 {
-  // Ensure the container holds elements of integral type
   static_assert(std::is_integral_v<typename Container::value_type>,
                 "Container must hold integral elements");
+  sum += InternetSum(buffer);
 
-  // Iterate over the container and process each element
-  for (const auto &element : buffer) {
-    // Break the element into 8-bit chunks and add them to the sum
-    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&element);
-    for (std::size_t i = 0; i < sizeof(element); ++i) {
-      sum += bytes[i] << ((i % 2 == 0)
-                              ? 8
-                              : 0); // Alternate between high and low bytes
-    }
-  }
-
-  // Perform the wrap-around at the end
-  while (sum > 0xFFFF) {
-    sum = (sum & 0xFFFF) + (sum >> 16);
-  }
+  // fold carries (unrolled for speed)
+  sum = (sum & 0xFFFF) + (sum >> 16);
+  sum = (sum & 0xFFFF) + (sum >> 16); // one more fold for rare cases
 
   return static_cast<uint16_t>(~sum);
 }
