@@ -55,6 +55,8 @@ public:
         b, asio::bind_executor(strand_write_, std::forward<Token>(t)));
   }
 
+  asio::ip::address_v4 GetIPv4PeerAddress() const override;
+
   bool Up() override;
   bool Down() override;
 

@@ -30,6 +30,8 @@ private:
   struct rtnl_link *link_;
   int ifindex_;
 
+  asio::ip::address_v4 peer4_address_;
+
   /* TC egress filter */
   struct bpf_object *filter_obj_;
   struct bpf_program *filter_prog_;
@@ -40,7 +42,7 @@ private:
   struct bpf_object *xmit_filter_obj_;
   struct bpf_program *xmit_filter_prog_;
 
-  /* TC egress filter */
+  /* TC egress filter properties */
   int filter_map_fd_;
   int services_v4_mapfd_;
   int services_v6_mapfd_;
@@ -60,11 +62,12 @@ private:
 
   std::list<PortMapFdPair> services_mapfd_v4_list_;
   std::list<PortMapFdPair> services_mapfd_v6_list_;
+  /* TC egress filter properties end here */
+
+  /* ioctl callback */
+  std::function<bool(unsigned long, int)> on_load_ebpf_callback_;
 
   int LoadEgressFilterEbpf(std::string_view ebpf_program_path);
-  /* TC egress filter end here */
-
-  std::function<bool(unsigned long, int)> on_load_ebpf_callback_;
 
   bool AttachXdpProgram(std::string_view xdp_program_path);
   bool LoadSteeringEbpf(std::string_view ebpf_program_path);
@@ -80,6 +83,8 @@ public:
 
   void SetIpv4AddressPeer(const asio::ip::address_v4 &addr);
   void SetIpv6AddressPeer(const asio::ip::address_v6 &addr);
+
+  asio::ip::address_v4 GetIPv4PeerAddress() const;
 
   void AddIpv4Address(const asio::ip::address_v4 &addr);
   void AddIpv6Address(const asio::ip::address_v6 &addr);
@@ -107,10 +112,11 @@ public:
 };
 
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::TunGnuLinuxDetailImpl()
-    : sk_(nullptr), link_(nullptr), ifindex_(-1), filter_obj_(nullptr),
-      filter_prog_(nullptr), steering_obj_(nullptr), steering_prog_(nullptr),
-      xmit_filter_obj_(nullptr), xmit_filter_prog_(nullptr),
-      filter_map_fd_(-1), services_v4_mapfd_(-1), services_v6_mapfd_(-1)
+    : sk_(nullptr), link_(nullptr), ifindex_(-1), peer4_address_(),
+      filter_obj_(nullptr), filter_prog_(nullptr), steering_obj_(nullptr),
+      steering_prog_(nullptr), xmit_filter_obj_(nullptr),
+      xmit_filter_prog_(nullptr), filter_map_fd_(-1), services_v4_mapfd_(-1),
+      services_v6_mapfd_(-1)
 {
 }
 
@@ -184,11 +190,13 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetIpv4AddressPeer(
   rtnl_addr_set_ifindex(rt_addr, ifindex_);
   rtnl_addr_set_local(rt_addr, local_addr);
 
-  auto peer = asio::ip::make_address_v4(n + 1);
-  addr_d = peer.to_bytes();
+  peer4_address_ = asio::ip::make_address_v4(n + 1);
+
+  addr_d = peer4_address_.to_bytes();
   struct nl_addr *peer_addr
       = nl_addr_build(AF_INET, addr_d.data(), addr_d.size());
   rtnl_addr_set_peer(rt_addr, peer_addr);
+
   rtnl_addr_set_prefixlen(rt_addr, 32);
 
   if (rtnl_addr_add(sk_, rt_addr, 0)) {
@@ -197,6 +205,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetIpv4AddressPeer(
     rtnl_addr_put(rt_addr);
     throw std::runtime_error("can't set peer addr");
   }
+
   nl_addr_put(local_addr);
   nl_addr_put(peer_addr);
   rtnl_addr_put(rt_addr);
@@ -221,6 +230,12 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetIpv6AddressPeer(
   }
   nl_addr_put(local_addr);
   rtnl_addr_put(rt_addr);
+}
+
+asio::ip::address_v4
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::GetIPv4PeerAddress() const
+{
+  return peer4_address_;
 }
 
 void
@@ -897,6 +912,12 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
     : TunGnuLinuxImpl(ex, intl_name)
 {
   pImpl_->SetIpv4AddressPeer(addr);
+}
+
+asio::ip::address_v4
+TunGnuLinuxImpl::GetIPv4PeerAddress() const
+{
+  return pImpl_->GetIPv4PeerAddress();
 }
 
 bool
