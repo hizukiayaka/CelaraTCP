@@ -12,6 +12,9 @@
 #include <type_traits>
 
 #include <asio/any_io_executor.hpp>
+#include <asio/ip/address.hpp>
+#include <asio/ip/network_v4.hpp>
+#include <asio/ip/network_v6.hpp>
 
 #include "net_filter_inf.hpp"
 
@@ -59,11 +62,10 @@ public:
   }
 
   virtual asio::ip::address_v4 GetIPv4PeerAddress() const = 0;
+  virtual asio::ip::address_v6 GetIPv6PeerAddress() const = 0;
 
   virtual bool Up() = 0;
   virtual bool Down() = 0;
-
-  virtual operator IPacketFilter *() = 0;
 };
 
 } // namespace netdev

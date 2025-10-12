@@ -10,20 +10,28 @@ extern "C"
 #include <netlink/route/link.h>
 #include <netlink/route/route.h>
 #include <netlink/socket.h>
-
-#include <bpf/bpf.h>
-#include <bpf/btf.h>
-#include <bpf/libbpf.h>
-
-#include "tun_egress.bpf.h"
 }
+
+#if HAVE_INT128
+// Use native 128-bit integer
+using int128_t = __int128;
+using uint128_t = unsigned __int128;
+#else
+// Use abseil's 128-bit integer implementation
+#include <absl/numeric/int128.h>
+using int128_t = absl::int128;
+using uint128_t = absl::uint128;
+#endif
+
+#include "tc_egress_filter.hpp"
+#include "tc_egress_filter_lite.hpp"
 
 #include "tun_gnu_linux_impl.hpp"
 
 namespace celaratcp {
 namespace netdev {
 
-class TunGnuLinuxImpl::TunGnuLinuxDetailImpl : public IPacketFilter
+class TunGnuLinuxImpl::TunGnuLinuxDetailImpl : public IFilterProvider
 {
 private:
   struct nl_sock *sk_;
@@ -31,47 +39,14 @@ private:
   int ifindex_;
 
   asio::ip::address_v4 peer4_address_;
+  asio::ip::address_v6 peer6_address_;
 
-  /* TC egress filter */
-  struct bpf_object *filter_obj_;
-  struct bpf_program *filter_prog_;
-
-  /* Tun eBPF */
-  struct bpf_object *steering_obj_;
-  struct bpf_program *steering_prog_;
-  struct bpf_object *xmit_filter_obj_;
-  struct bpf_program *xmit_filter_prog_;
-
-  /* TC egress filter properties */
-  int filter_map_fd_;
-  int services_v4_mapfd_;
-  int services_v6_mapfd_;
-
-  struct PeerEntry
-  {
-    asio::ip::address src_addr;
-    std::uint16_t src_port;
-  };
-
-  struct PortMapFdPair
-  {
-    std::uint16_t port;
-    int map_fd;
-    std::vector<std::optional<PeerEntry> > peers;
-  };
-
-  std::list<PortMapFdPair> services_mapfd_v4_list_;
-  std::list<PortMapFdPair> services_mapfd_v6_list_;
-  /* TC egress filter properties end here */
+  std::unique_ptr<IPacketFilter> egress_filter_;
+  std::unique_ptr<IPacketFilter> steering_filter_;
+  std::unique_ptr<IPacketFilter> xmit_filter_;
 
   /* ioctl callback */
   std::function<bool(unsigned long, int)> on_load_ebpf_callback_;
-
-  int LoadEgressFilterEbpf(std::string_view ebpf_program_path);
-
-  bool AttachXdpProgram(std::string_view xdp_program_path);
-  bool LoadSteeringEbpf(std::string_view ebpf_program_path);
-  int LoadXmitFilterEbpf(std::string_view ebpf_program_path);
 
 public:
   TunGnuLinuxDetailImpl();
@@ -85,24 +60,16 @@ public:
   void SetIpv6AddressPeer(const asio::ip::address_v6 &addr);
 
   asio::ip::address_v4 GetIPv4PeerAddress() const;
+  asio::ip::address_v6 GetIPv6PeerAddress() const;
 
-  void AddIpv4Address(const asio::ip::address_v4 &addr);
-  void AddIpv6Address(const asio::ip::address_v6 &addr);
+  void AddIpv4Address(const asio::ip::network_v4 &net);
+  void AddIpv6Address(const asio::ip::network_v6 &net);
 
   bool Up();
   bool Down();
 
-  std::list<NetDevFiltertype> GetSupportFilterType() const override;
-  bool LoadFilter() override;
-  bool SetNetDevFilterType(std::list<NetDevFiltertype> type) override;
-  bool AddWatchIpv4Port(uint16_t port) override;
-  bool AddWatchIpv6Port(uint16_t port) override;
-  bool RemoveWatchIpv4Port(uint16_t port) override;
-  bool RemoveWatchIpv6Port(uint16_t port) override;
-  bool AddPeerNode(const asio::ip::address &addr, uint16_t src_port,
-                   uint16_t dst_port) override;
-  bool RemovePeerNode(const asio::ip::address &addr, uint16_t src_port,
-                      uint16_t dst_port) override;
+  std::list<FilterAttachPoint> GetSupportAttachPoint() const override;
+  IPacketFilter *AttachFilter(FilterAttachPoint point) override;
 
   TunGnuLinuxDetailImpl(const TunGnuLinuxDetailImpl &other) = delete;
   TunGnuLinuxDetailImpl &operator=(const TunGnuLinuxDetailImpl &other)
@@ -113,10 +80,8 @@ public:
 
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::TunGnuLinuxDetailImpl()
     : sk_(nullptr), link_(nullptr), ifindex_(-1), peer4_address_(),
-      filter_obj_(nullptr), filter_prog_(nullptr), steering_obj_(nullptr),
-      steering_prog_(nullptr), xmit_filter_obj_(nullptr),
-      xmit_filter_prog_(nullptr), filter_map_fd_(-1), services_v4_mapfd_(-1),
-      services_v6_mapfd_(-1)
+      peer6_address_(), egress_filter_(nullptr), steering_filter_(nullptr),
+      xmit_filter_(nullptr)
 {
 }
 
@@ -124,30 +89,9 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::~TunGnuLinuxDetailImpl()
 {
   nl_socket_free(sk_);
 
-  if (filter_prog_) {
-    int prog_fd = bpf_program__fd(filter_prog_);
-    if (prog_fd < 0) {
-      bpf_object__close(filter_obj_);
-    } else {
-      LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex_,
-                  .attach_point = BPF_TC_EGRESS, );
-
-      LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = prog_fd,
-                  .flags = BPF_TC_F_REPLACE, .handle = 1, .priority = 1, );
-
-      bpf_tc_detach(&hook, &opts);
-      bpf_tc_hook_destroy(&hook);
-    }
-  }
-
-  if (filter_obj_)
-    bpf_object__close(filter_obj_);
-
-  if (steering_obj_)
-    bpf_object__close(steering_obj_);
-
-  if (xmit_filter_obj_)
-    bpf_object__close(xmit_filter_obj_);
+  xmit_filter_.release();
+  steering_filter_.release();
+  egress_filter_.release();
 }
 
 void
@@ -222,12 +166,47 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetIpv6AddressPeer(
 
   rtnl_addr_set_ifindex(rt_addr, ifindex_);
   rtnl_addr_set_local(rt_addr, local_addr);
-  /* FIXME: calculate IPv6 Peer address */
+
+  auto peer_addr_d = addr_d;
+
+  if constexpr (std::endian::native == std::endian::big) {
+    bool carry = true;
+    for (auto it = peer_addr_d.rbegin(); it != peer_addr_d.rend() && carry;
+         ++it)
+    {
+      ++(*it);
+      carry = (*it == 0);
+    }
+  } else {
+    uint128_t addr_n = 0;
+    std::size_t shift = 0;
+    for (auto it = peer_addr_d.rbegin(); it != peer_addr_d.rend(); ++it) {
+      addr_n |= ((*it) << shift);
+      shift += 8;
+    }
+    addr_n++;
+    for (auto it = peer_addr_d.rbegin(); it != peer_addr_d.rend(); ++it) {
+      *it = static_cast<uint8_t>(addr_n & 0xFF);
+      addr_n >>= 8;
+    }
+  }
+
+  struct nl_addr *peer_addr
+      = nl_addr_build(AF_INET6, peer_addr_d.data(), peer_addr_d.size());
+
+  peer6_address_ = asio::ip::make_address_v6(peer_addr_d, 0);
+
+  rtnl_addr_set_peer(rt_addr, peer_addr);
+  rtnl_addr_set_prefixlen(rt_addr, 128);
+
   if (rtnl_addr_add(sk_, rt_addr, 0)) {
+    nl_addr_put(peer_addr);
     nl_addr_put(local_addr);
     rtnl_addr_put(rt_addr);
     throw std::runtime_error("can't set addr");
   }
+
+  nl_addr_put(peer_addr);
   nl_addr_put(local_addr);
   rtnl_addr_put(rt_addr);
 }
@@ -238,10 +217,17 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::GetIPv4PeerAddress() const
   return peer4_address_;
 }
 
+asio::ip::address_v6
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::GetIPv6PeerAddress() const
+{
+  return peer6_address_;
+}
+
 void
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv4Address(
-    const asio::ip::address_v4 &addr)
+    const asio::ip::network_v4 &net)
 {
+  auto addr = net.address();
   auto addr_d = addr.to_bytes();
   struct nl_addr *local_addr
       = nl_addr_build(AF_INET, addr_d.data(), addr_d.size());
@@ -250,6 +236,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv4Address(
 
   rtnl_addr_set_ifindex(rt_addr, ifindex_);
   rtnl_addr_set_local(rt_addr, local_addr);
+  rtnl_addr_set_prefixlen(rt_addr, net.prefix_length());
 
   if (rtnl_addr_add(sk_, rt_addr, 0)) {
     nl_addr_put(local_addr);
@@ -262,8 +249,9 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv4Address(
 
 void
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv6Address(
-    const asio::ip::address_v6 &addr)
+    const asio::ip::network_v6 &net)
 {
+  auto addr = net.address();
   auto addr_d = addr.to_bytes();
   struct nl_addr *local_addr
       = nl_addr_build(AF_INET6, addr_d.data(), addr_d.size());
@@ -271,6 +259,8 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv6Address(
 
   rtnl_addr_set_ifindex(rt_addr, ifindex_);
   rtnl_addr_set_local(rt_addr, local_addr);
+  rtnl_addr_set_prefixlen(rt_addr, net.prefix_length());
+
   if (rtnl_addr_add(sk_, rt_addr, 0)) {
     nl_addr_put(local_addr);
     rtnl_addr_put(rt_addr);
@@ -278,523 +268,6 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddIpv6Address(
   }
   nl_addr_put(local_addr);
   rtnl_addr_put(rt_addr);
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AttachXdpProgram(
-    std::string_view xdp_program_path)
-{
-  int prog_fd = bpf_obj_get(xdp_program_path.data());
-  if (prog_fd < 0) {
-    return false;
-  }
-
-  if (bpf_prog_attach(prog_fd, ifindex_, BPF_XDP, 0) < 0) {
-    close(prog_fd);
-    return false;
-  }
-
-  return true;
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadSteeringEbpf(
-    std::string_view ebpf_program_path)
-{
-  struct bpf_object *obj
-      = bpf_object__open_file(ebpf_program_path.data(), nullptr);
-  if (!obj) {
-    return false;
-  }
-
-  if (bpf_object__load(obj)) {
-    bpf_object__close(obj);
-    return false;
-  }
-
-  steering_obj_ = obj;
-  steering_prog_ = bpf_object__find_program_by_name(obj, "socket_handler");
-  if (!steering_prog_) {
-    steering_obj_ = nullptr;
-    bpf_object__close(obj);
-    return false;
-  }
-
-  int prog_fd = bpf_program__fd(steering_prog_);
-  if (prog_fd < 0) {
-    steering_obj_ = nullptr;
-    steering_prog_ = nullptr;
-    bpf_object__close(obj);
-    return false;
-  }
-
-  if (!on_load_ebpf_callback_(TUNSETSTEERINGEBPF, prog_fd)) {
-    bpf_object__close(obj);
-    steering_obj_ = nullptr;
-    steering_prog_ = nullptr;
-    return false;
-  }
-
-  return true;
-}
-
-int
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadXmitFilterEbpf(
-    std::string_view ebpf_program_path)
-{
-  struct bpf_object *obj
-      = bpf_object__open_file(ebpf_program_path.data(), nullptr);
-  if (!obj) {
-    return false;
-  }
-
-  if (bpf_object__load(obj)) {
-    bpf_object__close(obj);
-    return false;
-  }
-
-  xmit_filter_obj_ = obj;
-  xmit_filter_prog_ = bpf_object__find_program_by_name(obj, "socket_handler");
-  if (!xmit_filter_prog_) {
-    bpf_object__close(obj);
-    xmit_filter_obj_ = nullptr;
-    return false;
-  }
-
-  int prog_fd = bpf_program__fd(xmit_filter_prog_);
-  if (prog_fd < 0) {
-    xmit_filter_prog_ = nullptr;
-    xmit_filter_obj_ = nullptr;
-    bpf_object__close(obj);
-    return false;
-  }
-
-  if (!on_load_ebpf_callback_(TUNSETFILTEREBPF, prog_fd)) {
-    xmit_filter_prog_ = nullptr;
-    xmit_filter_obj_ = nullptr;
-    bpf_object__close(obj);
-    return false;
-  }
-
-  return true;
-}
-
-std::list<NetDevFiltertype>
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::GetSupportFilterType() const
-{
-  return { NetDevFiltertype::DROP_IPV4, NetDevFiltertype::DROP_IPV6,
-           NetDevFiltertype::DROP_UDP, NetDevFiltertype::ACCEPT_4_TUPLE };
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilter()
-{
-#ifndef EBPF_OBJECT_DIR
-#error "EBPF_OBJECT_DIR must be defined by the build system"
-#endif
-  constexpr std::string_view obj_path = EBPF_OBJECT_DIR "/tun_egress.o";
-  return LoadEgressFilterEbpf(obj_path);
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::SetNetDevFilterType(
-    std::list<NetDevFiltertype> type)
-{
-  if (filter_map_fd_ < 0) {
-    return false;
-  }
-
-  struct filter_list_value value = {};
-  for (const auto &filter_type : type) {
-    switch (filter_type) {
-    case NetDevFiltertype::DROP_IPV4:
-      value.drop_ipv4 = 1;
-      break;
-    case NetDevFiltertype::DROP_IPV6:
-      value.drop_ipv6 = 1;
-      break;
-    case NetDevFiltertype::DROP_UDP:
-      value.drop_non_tcp = 1;
-      break;
-    case NetDevFiltertype::ACCEPT_4_TUPLE:
-      value.drop_nomatch_tcp = 1;
-      break;
-    default:
-      return false;
-    }
-  }
-  int key = 0;
-  if (bpf_map_update_elem(filter_map_fd_, &key, &value, BPF_ANY) != 0) {
-    return false;
-  }
-
-  return true;
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv4Port(uint16_t port)
-{
-  if (services_v4_mapfd_ < 0) {
-    return false;
-  }
-
-  for (const auto &pair : services_mapfd_v4_list_) {
-    if (pair.port == port) {
-      return true; // Already exists
-    }
-  }
-  std::string map_name = "port_ipv4_" + std::to_string(port);
-
-  LIBBPF_OPTS(bpf_map_create_opts, opts,
-              .map_flags = BPF_F_INNER_MAP);
-
-  int inner_map_fd = bpf_map_create(
-      BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32),
-      sizeof(struct peer_value_v4), PER_SERVICE_MAX_CONNECTION, &opts);
-  if (inner_map_fd < 0)
-    return false;
-
-  auto ret
-      = bpf_map_update_elem(services_v4_mapfd_, &port, &inner_map_fd, BPF_ANY);
-  if (ret != 0) {
-    close(inner_map_fd);
-    return false;
-  }
-
-  PortMapFdPair pair = { port, inner_map_fd, {} };
-  services_mapfd_v4_list_.push_back(pair);
-
-  return true;
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv6Port(uint16_t port)
-{
-  if (services_v6_mapfd_ < 0) {
-    return false;
-  }
-  for (const auto &pair : services_mapfd_v6_list_) {
-    if (pair.port == port) {
-      return true; // Already exists
-    }
-  }
-
-  std::string map_name = "port_ipv6_" + std::to_string(port);
-
-  LIBBPF_OPTS(bpf_map_create_opts, opts,
-              .map_flags = BPF_F_INNER_MAP);
-
-  int inner_map_fd = bpf_map_create(
-      BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32),
-      sizeof(struct peer_value_v6), PER_SERVICE_MAX_CONNECTION, &opts);
-  if (inner_map_fd < 0)
-    return false;
-
-  if (bpf_map_update_elem(services_v6_mapfd_, &port, &inner_map_fd, BPF_ANY)
-      != 0)
-  {
-    close(inner_map_fd);
-    return false;
-  }
-
-  PortMapFdPair pair = { port, inner_map_fd, {} };
-  services_mapfd_v6_list_.push_back(pair);
-
-  return true;
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemoveWatchIpv4Port(uint16_t port)
-{
-  if (services_v4_mapfd_ < 0) {
-    return false;
-  }
-  auto it = std::remove_if(
-      services_mapfd_v4_list_.begin(), services_mapfd_v4_list_.end(),
-      [port](const PortMapFdPair &pair) { return pair.port == port; });
-  if (it != services_mapfd_v4_list_.end()) {
-    bpf_map_delete_elem(services_v4_mapfd_, &port);
-    close(it->map_fd);
-    services_mapfd_v4_list_.erase(it, services_mapfd_v4_list_.end());
-    return true;
-  }
-  return false;
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemoveWatchIpv6Port(uint16_t port)
-{
-  if (services_v6_mapfd_ < 0) {
-    return false;
-  }
-
-  auto it = std::remove_if(
-      services_mapfd_v6_list_.begin(), services_mapfd_v6_list_.end(),
-      [port](const PortMapFdPair &pair) { return pair.port == port; });
-  if (it != services_mapfd_v6_list_.end()) {
-    bpf_map_delete_elem(services_v6_mapfd_, &port);
-    close(it->map_fd);
-    services_mapfd_v6_list_.erase(it, services_mapfd_v6_list_.end());
-    return true;
-  }
-  return false;
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddPeerNode(
-    const asio::ip::address &addr, uint16_t src_port, uint16_t dst_port)
-{
-  constexpr size_t MAX_PEERS
-      = 64; // or use PER_SERVICE_MAX_CONNECTION if defined
-  if (addr.is_v4()) {
-    if (services_v4_mapfd_ < 0) {
-      return false;
-    }
-    // Find the map_fd for the given dst_port
-    auto it = std::find_if(services_mapfd_v4_list_.begin(),
-                           services_mapfd_v4_list_.end(),
-                           [dst_port](const PortMapFdPair &pair) {
-                             return pair.port == dst_port;
-                           });
-
-    if (it == services_mapfd_v4_list_.end()) {
-      return false;
-    }
-
-    int map_fd = it->map_fd;
-    if (map_fd < 0)
-      return false;
-
-    PeerEntry peer{ addr, src_port };
-    auto &peers = it->peers;
-    // Find empty slot or existing peer
-    auto found = std::find_if(peers.begin(), peers.end(),
-                              [&](const std::optional<PeerEntry> &p) {
-                                return p && p->src_addr == peer.src_addr
-                                       && p->src_port == peer.src_port;
-                              });
-    if (found == peers.end()) {
-      // Try to reuse an empty slot
-      auto empty = std::find_if(
-          peers.begin(), peers.end(),
-          [](const std::optional<PeerEntry> &p) { return !p.has_value(); });
-      uint32_t idx;
-      if (empty != peers.end()) {
-        idx = std::distance(peers.begin(), empty);
-        *empty = peer;
-      } else if (peers.size() < MAX_PEERS) {
-        idx = peers.size();
-        peers.push_back(peer);
-      } else {
-        // No available slot
-        return false;
-      }
-      auto bytes = peer.src_addr.to_v4().to_bytes();
-      uint32_t ip;
-      std::memcpy(&ip, bytes.data(), 4);
-      struct peer_value_v4 val = { ip, peer.src_port };
-      bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
-    }
-  } else if (addr.is_v6()) {
-    if (services_v6_mapfd_ < 0) {
-      return false;
-    }
-
-    // Find empty slot or existing peer
-    auto it = std::find_if(services_mapfd_v6_list_.begin(),
-                           services_mapfd_v6_list_.end(),
-                           [dst_port](const PortMapFdPair &pair) {
-                             return pair.port == dst_port;
-                           });
-
-    if (it == services_mapfd_v6_list_.end()) {
-      return false;
-    }
-
-    int map_fd = it->map_fd;
-    if (map_fd < 0)
-      return false;
-
-    PeerEntry peer{ addr, src_port };
-    auto &peers = it->peers;
-    // Find empty slot or existing peer
-    auto found = std::find_if(peers.begin(), peers.end(),
-                              [&](const std::optional<PeerEntry> &p) {
-                                return p && p->src_addr == peer.src_addr
-                                       && p->src_port == peer.src_port;
-                              });
-    if (found == peers.end()) {
-      auto empty = std::find_if(
-          peers.begin(), peers.end(),
-          [](const std::optional<PeerEntry> &p) { return !p.has_value(); });
-      uint32_t idx;
-      if (empty != peers.end()) {
-        idx = std::distance(peers.begin(), empty);
-        *empty = peer;
-      } else if (peers.size() < MAX_PEERS) {
-        idx = peers.size();
-        peers.push_back(peer);
-      } else {
-        // No available slot
-        return false;
-      }
-      struct peer_value_v6 val = {};
-      auto bytes6 = peer.src_addr.to_v6().to_bytes();
-      std::copy(bytes6.begin(), bytes6.end(), val.src_ip);
-      val.src_port = peer.src_port;
-      bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
-    }
-  }
-  return false;
-}
-
-bool
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemovePeerNode(
-    const asio::ip::address &addr, uint16_t src_port, uint16_t dst_port)
-{
-  if (addr.is_v4()) {
-    if (services_v4_mapfd_ < 0) {
-      return false;
-    }
-    // Find the map_fd for the given dst_port
-    auto it = std::find_if(services_mapfd_v4_list_.begin(),
-                           services_mapfd_v4_list_.end(),
-                           [dst_port](const PortMapFdPair &pair) {
-                             return pair.port == dst_port;
-                           });
-
-    if (it == services_mapfd_v4_list_.end()) {
-      return false;
-    }
-
-    int map_fd = it->map_fd;
-    if (map_fd < 0)
-      return false;
-
-    PeerEntry peer{ addr, src_port };
-    auto &peers = it->peers;
-    auto found = std::find_if(peers.begin(), peers.end(),
-                              [&](const std::optional<PeerEntry> &p) {
-                                return p && p->src_addr == peer.src_addr
-                                       && p->src_port == peer.src_port;
-                              });
-
-    if (found != peers.end()) {
-      peers.erase(found);
-      uint32_t idx = std::distance(peers.begin(), found);
-      bpf_map_delete_elem(map_fd, &idx);
-      return true;
-    }
-  } else if (addr.is_v6()) {
-    if (services_v6_mapfd_ < 0) {
-      return false;
-    }
-
-    // Find empty slot or existing peer
-    auto it = std::find_if(services_mapfd_v6_list_.begin(),
-                           services_mapfd_v6_list_.end(),
-                           [dst_port](const PortMapFdPair &pair) {
-                             return pair.port == dst_port;
-                           });
-
-    if (it == services_mapfd_v6_list_.end()) {
-      return false;
-    }
-
-    int map_fd = it->map_fd;
-    if (map_fd < 0)
-      return false;
-
-    PeerEntry peer{ addr, src_port };
-    auto &peers = it->peers;
-    auto found = std::find_if(
-        peers.begin(), peers.end(), [&](const std::optional<PeerEntry> &p) {
-          return p->src_addr == peer.src_addr && p->src_port == peer.src_port;
-        });
-    if (found != peers.end()) {
-      peers.erase(found);
-      uint32_t idx = std::distance(peers.begin(), found);
-      bpf_map_delete_elem(map_fd, &idx);
-      return true;
-    }
-  }
-  return false;
-}
-
-int
-TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadEgressFilterEbpf(
-    std::string_view ebpf_program_path)
-{
-  struct bpf_object *obj
-      = bpf_object__open_file(ebpf_program_path.data(), nullptr);
-  if (!obj) {
-    return false;
-  }
-
-  if (bpf_object__load(obj)) {
-    bpf_object__close(obj);
-    return false;
-  }
-
-  filter_obj_ = obj;
-  filter_prog_ = bpf_object__find_program_by_name(obj, "egress_filter");
-  if (!filter_prog_) {
-    bpf_object__close(obj);
-    return false;
-  }
-
-  int prog_fd = bpf_program__fd(filter_prog_);
-  if (prog_fd < 0) {
-    bpf_object__close(obj);
-    return false;
-  }
-
-  LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex_,
-              .attach_point = BPF_TC_EGRESS, );
-
-  int err = bpf_tc_hook_create(&hook);
-  if (err && err != -EEXIST) {
-    bpf_object__close(obj);
-    return false;
-  }
-
-  LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = prog_fd, .flags = BPF_TC_F_REPLACE,
-              .handle = 1, .priority = 1, );
-
-  err = bpf_tc_attach(&hook, &opts);
-  if (err) {
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
-    return false;
-  }
-
-  filter_map_fd_ = bpf_object__find_map_fd_by_name(obj, "filter_list");
-  if (filter_map_fd_ < 0) {
-    bpf_tc_detach(&hook, &opts);
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
-    return false;
-  }
-
-  services_v4_mapfd_
-      = bpf_object__find_map_fd_by_name(obj, "services_v4_list");
-  if (services_v4_mapfd_ < 0) {
-    bpf_tc_detach(&hook, &opts);
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
-    return false;
-  }
-
-  services_v6_mapfd_
-      = bpf_object__find_map_fd_by_name(obj, "services_v6_list");
-  if (services_v6_mapfd_ < 0) {
-    bpf_tc_detach(&hook, &opts);
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
-    return false;
-  }
-
-  return true;
 }
 
 bool
@@ -832,6 +305,47 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::Down()
   }
 
   return true;
+}
+
+std::list<FilterAttachPoint>
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::GetSupportAttachPoint() const
+{
+  return { FilterAttachPoint::TC_EGRESS };
+}
+
+IPacketFilter *
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AttachFilter(FilterAttachPoint point)
+{
+#ifndef EBPF_OBJECT_DIR
+#error "EBPF_OBJECT_DIR must be defined by the build system"
+#endif
+  constexpr std::string_view egress_obj_path = EBPF_OBJECT_DIR "/tun_egress.o";
+  constexpr std::string_view egress_lite_obj_path
+      = EBPF_OBJECT_DIR "/l3_egress.o";
+
+  switch (point) {
+  case FilterAttachPoint::TC_EGRESS:
+    try {
+      egress_filter_
+          = std::make_unique<TcEgressFilter>(egress_obj_path, ifindex_);
+    }
+    catch (...) {
+      try {
+        egress_filter_ = std::make_unique<TcEgressFilterLite>(
+            egress_lite_obj_path, ifindex_);
+      }
+      catch (...) {
+        return nullptr;
+      }
+    }
+    return egress_filter_.get();
+    break;
+  default:
+    return nullptr;
+    break;
+  }
+
+  return nullptr;
 }
 
 TunGnuLinuxImpl::~TunGnuLinuxImpl() { stream_.close(); }
@@ -888,21 +402,34 @@ TunGnuLinuxImpl::GetIPv4PeerAddress() const
   return pImpl_->GetIPv4PeerAddress();
 }
 
+asio::ip::address_v6
+TunGnuLinuxImpl::GetIPv6PeerAddress() const
+{
+  return pImpl_->GetIPv6PeerAddress();
+}
+
 bool
 TunGnuLinuxImpl::Up()
 {
   return pImpl_->Up();
 }
+
 bool
 TunGnuLinuxImpl::Down()
 {
   return pImpl_->Down();
 }
 
-TunGnuLinuxImpl::
-operator IPacketFilter *()
+std::list<FilterAttachPoint>
+TunGnuLinuxImpl::GetSupportAttachPoint() const
 {
-  return pImpl_.get();
+  return pImpl_->GetSupportAttachPoint();
+}
+
+IPacketFilter *
+TunGnuLinuxImpl::AttachFilter(FilterAttachPoint point)
+{
+  return pImpl_->AttachFilter(point);
 }
 
 #if 0

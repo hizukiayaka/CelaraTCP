@@ -17,7 +17,8 @@
 namespace celaratcp {
 namespace netdev {
 
-class TunGnuLinuxImpl : public VirtualNetDevBase<TunGnuLinuxImpl>
+class TunGnuLinuxImpl : public VirtualNetDevBase<TunGnuLinuxImpl>,
+                        public IFilterProvider
 {
 private:
   class TunGnuLinuxDetailImpl;
@@ -56,11 +57,13 @@ public:
   }
 
   asio::ip::address_v4 GetIPv4PeerAddress() const override;
+  asio::ip::address_v6 GetIPv6PeerAddress() const override;
 
   bool Up() override;
   bool Down() override;
 
-  operator IPacketFilter *() override;
+  std::list<FilterAttachPoint> GetSupportAttachPoint() const override;
+  IPacketFilter *AttachFilter(FilterAttachPoint point) override;
 };
 
 } // namespace netdev

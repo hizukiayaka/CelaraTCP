@@ -20,8 +20,13 @@ endif
 libnl_dep = dependency('', required: false)
 libbpf_dep = dependency('', required: false)
 netdev_cpp_args = []
+
 if 'linux' in target_machine.kernel()
-  netdev_sources += 'src/tun_gnu_linux_impl.cpp'
+  netdev_sources += ['src/tun_gnu_linux_impl.cpp',
+                    'src/tc_egress_filter.cpp',
+                    'src/tc_egress_filter_lite.cpp',
+                    ]
+
   libnl_dep = dependency('libnl-route-3.0')
   libbpf_dep = dependency('libbpf')
   subdir('ebpf')
@@ -31,10 +36,31 @@ else
   error('no support OS')
 endif
 
+# Check for 128-bit integer support
+cpp = meson.get_compiler('cpp')
+has_int128 = cpp.compiles('''
+  #include <cstdint>
+  int main() {
+    __int128 a = 0;
+    unsigned __int128 b = 0;
+    return 0;
+  }
+''', name: 'int128 support')
+
+# Define dependencies and flags based on int128 support
+if has_int128
+  netdev_cpp_args += '-DHAVE_INT128=1'
+  abseil_dep = dependency('', required: false)
+else
+  # Add abseil dependency when int128 is not available
+  abseil_dep = dependency('absl', required: true)
+  netdev_cpp_args += '-DHAVE_INT128=0'
+endif
+
 netdev = library('netdev',
     netdev_sources,
     include_directories: [netdev_inc, common_inc],
-    dependencies: [libnl_dep, libbpf_dep],
+    dependencies: [libnl_dep, libbpf_dep, abseil_dep],
     cpp_args: netdev_cpp_args,
     sources: netdev_ebpf_skeletons  # Ensure skeletons are generated first
 )
