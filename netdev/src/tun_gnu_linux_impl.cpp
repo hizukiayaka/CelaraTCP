@@ -437,19 +437,22 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv4Port(uint16_t port)
   if (services_v4_mapfd_ < 0) {
     return false;
   }
+
   for (const auto &pair : services_mapfd_v4_list_) {
     if (pair.port == port) {
       return true; // Already exists
     }
   }
-#if 1
   std::string map_name = "port_ipv4_" + std::to_string(port);
+
+  LIBBPF_OPTS(bpf_map_create_opts, opts,
+              .map_flags = BPF_F_INNER_MAP);
+
   int inner_map_fd = bpf_map_create(
       BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32),
-      sizeof(struct peer_value_v4), PER_SERVICE_MAX_CONNECTION, 0);
-  if (inner_map_fd < 0) {
+      sizeof(struct peer_value_v4), PER_SERVICE_MAX_CONNECTION, &opts);
+  if (inner_map_fd < 0)
     return false;
-  }
 
   auto ret
       = bpf_map_update_elem(services_v4_mapfd_, &port, &inner_map_fd, BPF_ANY);
@@ -457,47 +460,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv4Port(uint16_t port)
     close(inner_map_fd);
     return false;
   }
-#else
-  struct bpf_map_info o = { 0 };
-  __u32 olen = sizeof(o);
-  if (bpf_obj_get_info_by_fd(services_v4_mapfd_, &o, &olen) < 0) {
-    return false;
-  }
 
-  int tmpl_fd
-      = bpf_object__find_map_fd_by_name(filter_obj_, "peers_v4_inner_map");
-  struct bpf_map_info t = { 0 };
-  __u32 tlen = sizeof(t);
-  if (bpf_obj_get_info_by_fd(tmpl_fd, &t, &tlen) < 0) {
-    close(tmpl_fd);
-    return false;
-  }
-  close(tmpl_fd);
-
-  struct btf *btf = bpf_object__btf(filter_obj_);
-  int btf_fd = btf__fd(btf);
-
-  LIBBPF_OPTS(bpf_map_create_opts, opts, .btf_fd = btf_fd,
-              .btf_key_type_id = t.btf_key_type_id,
-              .btf_value_type_id = t.btf_value_type_id,
-              .map_flags = (t.map_flags & ~BPF_F_INNER_MAP));
-  std::string map_name = "svc_ipv4_" + std::to_string(port);
-  int inner_map_fd
-      = bpf_map_create((enum bpf_map_type)t.type, map_name.c_str(), t.key_size,
-                       t.value_size, PER_SERVICE_MAX_CONNECTION, &opts);
-
-  if (inner_map_fd < 0) {
-    return false;
-  }
-
-  __u32 val_fd = (__u32)inner_map_fd;
-  auto ret = bpf_map_update_elem(services_v4_mapfd_, &port, &val_fd, BPF_ANY);
-  if (ret != 0) {
-    close(inner_map_fd);
-    return false;
-  }
-
-#endif
   PortMapFdPair pair = { port, inner_map_fd, {} };
   services_mapfd_v4_list_.push_back(pair);
 
@@ -517,18 +480,23 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::AddWatchIpv6Port(uint16_t port)
   }
 
   std::string map_name = "port_ipv6_" + std::to_string(port);
+
+  LIBBPF_OPTS(bpf_map_create_opts, opts,
+              .map_flags = BPF_F_INNER_MAP);
+
   int inner_map_fd = bpf_map_create(
       BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32),
-      sizeof(struct peer_value_v6), PER_SERVICE_MAX_CONNECTION, nullptr);
-  if (inner_map_fd < 0) {
+      sizeof(struct peer_value_v6), PER_SERVICE_MAX_CONNECTION, &opts);
+  if (inner_map_fd < 0)
     return false;
-  }
+
   if (bpf_map_update_elem(services_v6_mapfd_, &port, &inner_map_fd, BPF_ANY)
       != 0)
   {
     close(inner_map_fd);
     return false;
   }
+
   PortMapFdPair pair = { port, inner_map_fd, {} };
   services_mapfd_v6_list_.push_back(pair);
 
