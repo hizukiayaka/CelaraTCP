@@ -224,13 +224,19 @@ main(int argc, char *argv[])
 
   auto netdev = std::make_shared<netdev::VirtualNetDev>(exec, interface_name,
                                                         local_addr);
-  netdev::IPacketFilter *filter = *netdev;
+  auto attach_list = netdev->GetSupportAttachPoint();
+  netdev::IPacketFilter *filter
+      = netdev->AttachFilter(netdev::FilterAttachPoint::TC_EGRESS);
 
-  auto filter_list = filter->GetSupportFilterType();
+  if (!filter) {
+    std::cerr << "Error: Failed to load the packet filter.\n";
+    return 1;
+  }
+  auto filter_list = filter->GetSupportFilterActions();
 
-  std::list<netdev::NetDevFiltertype> apply_filters
-      = { netdev::NetDevFiltertype::DROP_IPV6,
-          netdev::NetDevFiltertype::DROP_UDP };
+  std::list<netdev::FilterAction> apply_filters
+      = { netdev::FilterAction::DROP_IPV6,
+          netdev::FilterAction::ACCEPT_TCP_ONLY };
 
   auto all_supported = std::all_of(
       apply_filters.cbegin(), apply_filters.cend(),
@@ -240,11 +246,10 @@ main(int argc, char *argv[])
       });
 
   if (all_supported) {
-    if (!filter->LoadFilter()) {
-      std::cerr << "Error: Failed to load the packet filter.\n";
+    if (!filter->EnableFilters(apply_filters)) {
+      std::cerr << "Error: Failed to apply the packet filter.\n";
       return 1;
     }
-    filter->SetNetDevFilterType(apply_filters);
   } else {
     std::cerr
         << "Error: The network device does not support all required filters."
