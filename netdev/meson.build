@@ -23,8 +23,10 @@ netdev_cpp_args = []
 
 if 'linux' in target_machine.kernel()
   netdev_sources += ['src/tun_gnu_linux_impl.cpp',
+                    'src/ethernet_netdev_linux.cpp',
                     'src/tc_egress_filter.cpp',
                     'src/tc_egress_filter_lite.cpp',
+                    'src/tc_ingress_fwd.cpp',
                     ]
 
   libnl_dep = dependency('libnl-route-3.0')
