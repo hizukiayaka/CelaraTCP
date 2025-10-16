@@ -6,14 +6,21 @@
 #ifndef USERSPACE_TCP_STACK_HPP_
 #define USERSPACE_TCP_STACK_HPP_
 
-#include <algorithm>
+extern "C"
+{
 #include <arpa/inet.h>
+}
+
+#include <algorithm>
 #include <chrono>
 #include <concepts>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <forward_list>
+#include <memory>
+#include <numeric>
+#include <random>
 
 #if PARALLEL
 #include <execution>
@@ -22,11 +29,7 @@
 #define PAR
 #endif
 
-#include <asio.hpp>
-#include <memory>
-#include <mutex>
-#include <numeric>
-#include <optional>
+#include <asio/ip/address.hpp>
 
 #include "internet_checksum.hpp"
 #include "net_packet.hpp"
@@ -101,7 +104,8 @@ protected:
   }();
 
   // Data offset + Rsrvd
-  constexpr static uint8_t kTcpDOffsetRsrvd = 0x50;
+  constexpr static uint_fast8_t kTcpDOffsetRsrvd = 0x50;
+  constexpr static uint_fast8_t kBSDIpTTLValue = 64;
 
   using IpHdrArray = std::array<
       uint8_t, std::conditional_t<
@@ -111,12 +115,6 @@ protected:
 
   IpHdrArray ip_hdr_tmpl_;
   std::array<uint8_t, kTcpHdrMinimalSize> tcp_hdr_tmpl_;
-  // The outgoing sequence number
-  uint32_t sequenceN;
-  // The outgoing ACK number
-  uint32_t ackN;
-
-  std::chrono::time_point<std::chrono::steady_clock> last_activity_;
 
   /**
    * included pseudo IP header sum(TCP seg len is not included),
@@ -125,7 +123,17 @@ protected:
    */
   uint_fast32_t partial_sum_for_checksum_;
 
-protected:
+  // The initial outoging sequence number
+  uint_fast32_t initial_sequenceN_;
+  // The outgoing sequence number
+  uint32_t sequenceN;
+  // The outgoing ACK number
+  uint32_t ackN;
+
+  uint_fast8_t ip_ttl_value_;
+
+  std::chrono::time_point<std::chrono::steady_clock> last_activity_;
+
   static uint_fast32_t
   SrcDstAddrInternetSum(AddrType::bytes_type &l_addr_nd,
                         AddrType::bytes_type &r_addr_nd)
@@ -175,33 +183,34 @@ protected:
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
       = 0>
-  bool
-  ConstructIpHdr(NetPacket &hdr, const std::size_t payload_size = 0,
-                 uint8_t ttl = 64) noexcept
+  std::size_t
+  ConstructIpHdr(std::span<uint8_t> hdr, const std::size_t payload_size,
+                 uint8_t ttl) noexcept
   {
-    if (hdr.GetMaximumSize() < kIpv4HdrSize) {
-      return false;
-    }
+    if (std::size(hdr) < kIpv4HdrSize)
+        return 0;
 
-    auto data = hdr.GetData();
-    std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), data.begin());
+    auto data = std::data(hdr);
+    std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), hdr.begin());
 
     // Total Length
-    *reinterpret_cast<uint16_t *>(data.data() + 2)
-        = htons(kIpv4HdrSize + kTcpHdrMinimalSize + payload_size);
+    *reinterpret_cast<uint16_t *>(data + 2)
+        = htons(kIpv4HdrSize + payload_size);
     // TTL
-    data[8] = ttl;
+    if (ttl == 0)
+        data[8] = kBSDIpTTLValue;
+    else
+        data[8] = ttl;
 
     if constexpr (Policy == CheckSumPolicy::IP
                   || Policy == CheckSumPolicy::IP_TCP)
     {
       uint16_t csum
-          = InternetChecksum(std::span<uint8_t>(data.data(), kIpv4HdrSize));
-      *reinterpret_cast<uint16_t *>(data.data() + 10) = htons(csum);
+          = InternetChecksum(hdr.subspan(0, kIpv4HdrSize));
+      *reinterpret_cast<uint16_t *>(data + 10) = htons(csum);
     }
 
-    hdr.SetUsedBytes(kIpv4HdrSize);
-    return true;
+    return kIpv4HdrSize;
   }
 
   template <
@@ -251,25 +260,27 @@ protected:
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
       = 0>
-  bool
-  ConstructIpHdr(NetPacket &hdr, const std::size_t payload_size = 0,
-                 uint8_t ttl = 64) noexcept
+  std::size_t
+  ConstructIpHdr(std::span<uint8_t> hdr, const std::size_t payload_size,
+                 uint8_t ttl) noexcept
   {
-    // Construct IPv6 header
-    if (hdr.GetMaximumSize() < kIpv6HdrSize) {
-      return false;
-    }
-    auto data = hdr.GetData();
-    std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), data.begin());
+    if (std::size(hdr) < kIpv6HdrSize)
+        return 0;
 
-    // Payload Length
-    *reinterpret_cast<uint16_t *>(data.data() + 4)
-        = htons(kIpv6HdrSize + kTcpHdrMinimalSize + payload_size);
+    auto data = std::data(hdr);
+    std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), hdr.begin());
+
+    // Total Length
+    *reinterpret_cast<uint16_t *>(data + 4)
+        = htons(kIpv6HdrSize + payload_size);
+
     // Hop Limit
-    data[7] = ttl;
+    if (ttl == 0)
+        data[7] = kBSDIpTTLValue;
+    else
+        data[7] = ttl;
 
-    hdr.SetUsedBytes(kIpv6HdrSize);
-    return true;
+    return kIpv6HdrSize;
   }
 
   template <
@@ -295,7 +306,9 @@ public:
                 const AddrType &remote_addr, uint_fast16_t remote_port)
       : state_(TcpConnectionState::LISTEN), remote_addr_(remote_addr),
         remote_port_(remote_port), ip_hdr_tmpl_{}, tcp_hdr_tmpl_{},
-        sequenceN(0), ackN(0), partial_sum_for_checksum_(0)
+        partial_sum_for_checksum_(0),
+        initial_sequenceN(0),
+        sequenceN(0), ackN(0)
   {
     typename AddrType::bytes_type l_addr_nd{ local_addr.to_bytes() };
     typename AddrType::bytes_type r_addr_nd{ remote_addr.to_bytes() };
@@ -310,7 +323,7 @@ public:
     *reinterpret_cast<uint16_t *>(data + 2) = rport_nd;
 
     // Data offset + Rsrvd
-    data[12] = kTcpDOffsetRsrvd;
+    data[12] = static_cast<uint8_t>(kTcpDOffsetRsrvd);
 
     // Window size
     *reinterpret_cast<uint16_t *>(data + 14) = kTcpWindowNetworkOrder;
@@ -328,8 +341,17 @@ public:
     }
   }
 
-  ~TcpConnection() = default;
+  virtual ~TcpConnection() = default;
+  TcpConnection(TcpConnection &&) = default;
+  TcpConnection &operator=(TcpConnection &&) = default;
 
+  virtual void SetPacketSeqAck(NetPacket &packet, uint_fast32_t seq, uint_fast32_t ack)
+  {
+      packet.meta.data[0] = seq;
+      packet.meta.data[1] = ack;
+  }
+
+#if 0
   virtual void
   UpdateRecvSeq(TcpPacketType type, uint32_t seq,
                 uint32_t payload_size = 0) noexcept
@@ -380,44 +402,132 @@ public:
       break;
     }
   }
-
-  virtual void
-  SetPacketMetaData(std::shared_ptr<NetPacket> packet, uint32_t seq,
-                    uint32_t ack)
-  {
-    packet->meta.data[0] = seq;
-    packet->meta.data[1] = ack;
-  }
+#endif
 
   virtual void Established() {};
 
-  TcpConnection(TcpConnection &&) = default;
-  TcpConnection &operator=(TcpConnection &&) = default;
-
-  void
-  FreshActivity()
+  // We don't handle the checksum here
+  virtual bool
+  FillIpTcpHdr(TcpPacketType packetType, NetPacket &packet,
+               std::size_t payload_size,
+               uint_fast32_t seq, uint_fast32_t ack,
+               uint_fast32_t ttl)
   {
-    last_activity_ = std::chrono::steady_clock::now();
+    std::size_t ip_hdr_size;
+    auto hdr = packet.GetData();
+
+    switch (packetType) {
+    case TcpPacketType::ACK:
+      if (payload) {
+        ip_hdr_size = ConstructIpHdr(hdr, kTcpHdrMinimalSize + payload_size, ttl);
+      } else {
+        ip_hdr_size = ConstructIpHdr(hdr, kTcpHdrMinimalSize, ttl);
+      }
+      break;
+    default:
+      if (payload_size)
+          return false;
+      ip_hdr_size = ConstructIpHdr(hdr, kTcpHdrMinimalSize, ttl);
+      break;
+    }
+
+    auto tcp = hdr.subspan(ip_hdr_size);
+    std::copy(tcp_hdr_tmpl_.cbegin(), tcp_hdr_tmpl_.cend(), tcp.begin());
+    auto data = std::data(tcp);
+
+    // Sequence number
+    *reinterpret_cast<uint32_t *>(data + 4) = htonl(seq);
+    // Acknowledgment number
+    *reinterpret_cast<uint32_t *>(data + 8) = htonl(ack);
+
+    switch (packetType) {
+    case TcpPacketType::SYN:
+      data[13] = 0x02; // Flag
+      break;
+    case TcpPacketType::SYN_ACK:
+      data[13] = 0x12; // Flags
+      break;
+    case TcpPacketType::ACK:
+      data[13] = 0x10; // Flags
+      break;
+    case TcpPacketType::FIN:
+      data[13] = 0x01; // Flags
+      break;
+    case TcpPacketType::FIN_ACK:
+      data[13] = 0x11; // Flags
+      break;
+    case TcpPacketType::RST:
+      data[13] = 0x04; // Flags (RST)
+      break;
+    default:
+      throw std::invalid_argument("Invalid TcpPacketType");
+    }
+
+    return true;
   }
 
+  template <NetPacketWrapper PacketContainer>
   virtual void
-  FillPacketIpTcpHdr(TcpPacketType packetType, NetPacket &hdr,
-                     std::shared_ptr<NetPacket> payload = nullptr)
+  FillPacketIpTcpHdr(TcpPacketType packetType,
+                     PacketContainer &packets,
+                     uint_fast32_t seq = 0, uint_fast32_t ack = 0,
+                     uint_fast32_t ttl = 0)
   {
+    if constexpr (NetPacketContainer<PacketContainer>) {
+        auto it = std::begin(packets);
+        auto end = std::end(packets);
+
+        if (it == end) {
+            // empty container
+            return;
+        }
+
+        auto total_bytes_used = std::accumulate(
+            it, end, std::size_t(0),
+            [] (std::size_t sum, auto &packet) {
+                if constexpr (requires { packet->get(); } || requires { *packet; }) {
+                    return sum + packet->GetUsedBytes();
+                } else {
+                    return sum + packet.GetUsedBytes();
+                }
+            });
+
+    } else {
+		// Single packet case - handle both reference and pointer types
+		if constexpr (requires { packets->GetUsedBytes(); }) {
+		  // Smart pointer case
+		  auto bytes_used = packets->GetUsedBytes();
+		  // FIXME: remove the IP header size
+		  if (bytes_used > 0)
+			FillIpTcpHdr(*packets, bytes_used - kTcpHdrMinimalSize, packetType, seq, ack, ttl);
+		  else
+			FillIpTcpHdr(*packets, 0, packetType, seq, ack, ttl);
+		} 
+		else if constexpr (requires { packets.GetUsedBytes(); }) {
+		  // Reference case
+		  auto bytes_used = packets.GetUsedBytes();
+		  // FIXME: remove the IP header size
+		  if (bytes_used > 0)
+			FillIpTcpHdr(packets, bytes_used - kTcpHdrMinimalSize, packetType, seq, ack, ttl);
+		  else
+			FillIpTcpHdr(packets, 0, packetType, seq, ack, ttl);
+		}
+    }
+
     bool success = false;
     switch (packetType) {
     case TcpPacketType::ACK:
       if (payload) {
-        success = ConstructIpHdr(hdr, payload->GetUsedBytes());
+        success = ConstructIpHdr(hdr, payload->GetUsedBytes(), ttl);
       } else {
-        success = ConstructIpHdr(hdr);
+        success = ConstructIpHdr(hdr, 0, ttl);
       }
       break;
     default:
       if (payload) {
         payload.reset();
       }
-      success = ConstructIpHdr(hdr);
+      success = ConstructIpHdr(hdr, 0, ttl);
       break;
     }
 
@@ -430,14 +540,9 @@ public:
     std::copy(tcp_hdr_tmpl_.cbegin(), tcp_hdr_tmpl_.cend(), tcp.begin());
     auto data = tcp.data();
 
-    uint32_t seq, ack;
-    seq = hdr.meta.data[0];
-    ack = hdr.meta.data[1];
     // Sequence number
-    seq += sequenceN;
     *reinterpret_cast<uint32_t *>(data + 4) = htonl(seq);
     // Acknowledgment number
-    ack += ackN;
     *reinterpret_cast<uint32_t *>(data + 8) = htonl(ack);
 
     switch (packetType) {
@@ -489,6 +594,16 @@ public:
     }
 
     hdr.SetUsedBytes(ip_hdr_size + kTcpHdrMinimalSize);
+  }
+
+  bool SetInitialSequenceNumber(uint_fast32_t num) {
+      initial_sequenceN_ = num;
+  }
+
+  void
+  FreshActivity()
+  {
+    last_activity_ = std::chrono::steady_clock::now();
   }
 };
 
@@ -614,73 +729,6 @@ protected:
   std::forward_list<std::shared_ptr<TcpServiceT> > services_;
   AddrType local_addr_;
 
-private:
-  template <typename CharIterator>
-  class Uint16Iterator
-  {
-  public:
-    using iterator_category = std::forward_iterator_tag;
-    using value_type = uint16_t;
-    using difference_type = std::ptrdiff_t;
-    using pointer = uint16_t *;
-    using reference = uint16_t &;
-
-    Uint16Iterator(CharIterator it) : it_(it) {}
-
-    uint16_t
-    operator*() const
-    {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-      return static_cast<uint16_t>(static_cast<uint8_t>(*(it_ + 1)) << 8)
-             | static_cast<uint8_t>(*it_);
-#else
-      return *reinterpret_cast<const uint16_t *>(&*it_);
-#endif
-    }
-    Uint16Iterator &
-    operator++()
-    {
-      it_ += 2;
-      return *this;
-    }
-
-    Uint16Iterator
-    operator++(int)
-    {
-      Uint16Iterator tmp = *this;
-      it_ += 2;
-      return tmp;
-    }
-
-    bool
-    operator==(const Uint16Iterator &other) const
-    {
-      return it_ == other.it_;
-    }
-
-    bool
-    operator!=(const Uint16Iterator &other) const
-    {
-      return it_ != other.it_;
-    }
-
-  private:
-    CharIterator it_;
-  };
-
-  template <typename Iterator>
-  uint_fast16_t
-  RangeCheckSum(Iterator begin, Iterator end)
-  {
-    uint_fast32_t sum
-        = std::reduce(Uint16Iterator(begin), Uint16Iterator(end), 0u);
-
-    while (sum >> 16)
-      sum = (sum & 0xFFFF) + (sum >> 16);
-
-    return static_cast<uint16_t>(~sum);
-  }
-
 protected:
   template <
       typename T = AddrType,
@@ -725,6 +773,50 @@ protected:
     dst_addr = asio::ip::address_v6(bytes);
     constexpr auto ipHeaderLength = 40; // IPv6 header is always 40 bytes
     return { true, ipHeaderLength };
+  }
+
+  /**
+   * Generates an initial sequence number based on the 4-tuple
+   * (local address, local port, remote address, remote port).
+   *
+   * This approach avoids reliance on the wall clock and uses a hash-based
+   * method for determinism and uniqueness.
+   *
+   * @param local_addr The local IP address
+   * @param local_port The local port
+   * @param remote_addr The remote IP address
+   * @param remote_port The remote port
+   * @return A deterministic initial sequence number
+   */
+  static uint32_t
+  GenerateInitialSequenceNumber(const AddrType &local_addr,
+                                uint_fast16_t local_port,
+                                const AddrType &remote_addr,
+                                uint_fast16_t remote_port)
+  {
+    static std::array<uint32_t, 4> secret;
+    static std::once_flag init_flag;
+
+    // Initialize the secret key once
+    std::call_once(init_flag, []() {
+      std::random_device rd;
+      std::mt19937 rng(rd());
+      std::uniform_int_distribution<uint32_t> dist;
+      for (auto &val : secret) {
+        val = dist(rng);
+      }
+    });
+
+    // Combine the 4-tuple with the secret key
+    uint32_t hash = secret[0];
+    hash ^= std::hash<AddrType>{}(local_addr) ^ secret[1];
+    hash ^= static_cast<uint32_t>(local_port) ^ secret[2];
+    hash ^= std::hash<AddrType>{}(remote_addr) ^ secret[3];
+    hash ^= static_cast<uint32_t>(remote_port);
+
+    // Finalize the hash
+    hash = (hash >> 16) ^ (hash & 0xFFFF);
+    return hash;
   }
 
   UserspaceTcpStack() {}
@@ -808,10 +900,10 @@ public:
   }
 
   virtual uint32_t
-  InitialConnSeq([[maybe_unused]] const AddrType &localAddr,
-                 [[maybe_unused]] const uint_fast16_t localPort,
-                 [[maybe_unused]] const AddrType &remoteAddr,
-                 [[maybe_unused]] const uint_fast16_t remotePort)
+  InitialConnSeq([[maybe_unused]] const AddrType &local_addr,
+                 [[maybe_unused]] const uint_fast16_t local_port,
+                 [[maybe_unused]] const AddrType &remote_addr,
+                 [[maybe_unused]] const uint_fast16_t remote_port)
   {
     return 0;
   }

@@ -252,7 +252,8 @@ public:
       auto conn = service->GetConnection(src_addr, src_port);
       if (conn) {
         if (conn->state_ == TcpConnectionState::SYN_SENT) {
-          auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
+          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
+          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 8));
           conn->UpdateRecvSeq(TcpPacketType::SYN_ACK, seqNum);
 
           auto reply = hdr_pool_->allocate();
