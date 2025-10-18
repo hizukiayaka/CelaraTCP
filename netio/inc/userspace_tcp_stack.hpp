@@ -107,6 +107,14 @@ protected:
   constexpr static uint_fast8_t kTcpDOffsetRsrvd = 0x50;
   constexpr static uint_fast8_t kBSDIpTTLValue = 64;
 
+  constexpr static uint_fast16_t kIPHdrSize = [] {
+    if constexpr (std::is_same_v<AddrType, asio::ip::address_v4>) {
+      return kIpv4HdrSize;
+    } else {
+      return kIpv6HdrSize;
+    }
+  }();
+
   using IpHdrArray = std::array<
       uint8_t, std::conditional_t<
                    std::is_same_v<AddrType, asio::ip::address_v4>,
@@ -188,7 +196,7 @@ protected:
                  uint8_t ttl) noexcept
   {
     if (std::size(hdr) < kIpv4HdrSize)
-        return 0;
+      return 0;
 
     auto data = std::data(hdr);
     std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), hdr.begin());
@@ -198,15 +206,14 @@ protected:
         = htons(kIpv4HdrSize + payload_size);
     // TTL
     if (ttl == 0)
-        data[8] = kBSDIpTTLValue;
+      data[8] = kBSDIpTTLValue;
     else
-        data[8] = ttl;
+      data[8] = ttl;
 
     if constexpr (Policy == CheckSumPolicy::IP
                   || Policy == CheckSumPolicy::IP_TCP)
     {
-      uint16_t csum
-          = InternetChecksum(hdr.subspan(0, kIpv4HdrSize));
+      uint16_t csum = InternetChecksum(hdr.subspan(0, kIpv4HdrSize));
       *reinterpret_cast<uint16_t *>(data + 10) = htons(csum);
     }
 
@@ -237,16 +244,16 @@ protected:
   {
     // Version and Traffic Class
     buf[0] = 0x60;
-#if 0
+
     // Traffic Class and Flow Label
     buf[1] = 0;
     // Flow Label
     buf[2] = 0;
     // Flow Label
     buf[3] = 0;
+
     // Hop Limit
-    data[7] = 0;
-#endif
+    buf[7] = 0;
     // Next Header
     buf[6] = IPPROTO_TCP;
     // Source and destination addresses
@@ -265,7 +272,7 @@ protected:
                  uint8_t ttl) noexcept
   {
     if (std::size(hdr) < kIpv6HdrSize)
-        return 0;
+      return 0;
 
     auto data = std::data(hdr);
     std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), hdr.begin());
@@ -276,9 +283,9 @@ protected:
 
     // Hop Limit
     if (ttl == 0)
-        data[7] = kBSDIpTTLValue;
+      data[7] = kBSDIpTTLValue;
     else
-        data[7] = ttl;
+      data[7] = ttl;
 
     return kIpv6HdrSize;
   }
@@ -298,6 +305,103 @@ protected:
     return sum;
   }
 
+  // We don't handle the checksum here
+  virtual bool
+  FillIpTcpHdr(TcpPacketType packet_type, NetPacket &packet,
+               std::size_t payload_size, uint_fast32_t seq, uint_fast32_t ack,
+               uint_fast32_t ttl)
+  {
+    std::size_t ip_hdr_size;
+    auto hdr = packet.GetData();
+
+    switch (packet_type) {
+    case TcpPacketType::ACK:
+      ip_hdr_size
+          = ConstructIpHdr(hdr, kTcpHdrMinimalSize + payload_size, ttl);
+      break;
+    default:
+      if (payload_size)
+        return false;
+      ip_hdr_size = ConstructIpHdr(hdr, kTcpHdrMinimalSize, ttl);
+      break;
+    }
+
+    auto tcp = hdr.subspan(ip_hdr_size);
+    std::copy(tcp_hdr_tmpl_.cbegin(), tcp_hdr_tmpl_.cend(), tcp.begin());
+    auto data = std::data(tcp);
+
+    // Sequence number
+    *reinterpret_cast<uint32_t *>(data + 4) = htonl(seq);
+    // Acknowledgment number
+    *reinterpret_cast<uint32_t *>(data + 8) = htonl(ack);
+
+    switch (packet_type) {
+    case TcpPacketType::SYN:
+      data[13] = 0x02; // Flag
+      break;
+    case TcpPacketType::SYN_ACK:
+      data[13] = 0x12; // Flags
+      break;
+    case TcpPacketType::ACK:
+      data[13] = 0x10; // Flags
+      break;
+    case TcpPacketType::FIN:
+      data[13] = 0x01; // Flags
+      break;
+    case TcpPacketType::FIN_ACK:
+      data[13] = 0x11; // Flags
+      break;
+    case TcpPacketType::RST:
+      data[13] = 0x04; // Flags (RST)
+      break;
+    default:
+      throw std::invalid_argument("Invalid TcpPacketType");
+    }
+
+    return true;
+  }
+
+  /**
+   * It would fill TCP checksum field, with pre-calculated pseudo header sum
+   * (except whole payload/Upper-layer length, aka. TCP segment length).
+   */
+  void
+  CompleteTcpCheckSum(std::span<uint8_t> tcp, std::size_t payload_size,
+                      uint_fast32_t seq, uint_fast32_t ack,
+                      uint_fast32_t payload_sum = 0)
+  {
+    if (payload_size < kTcpHdrMinimalSize) {
+      throw std::invalid_argument(
+          "payload_size is less than kTcpHdrMinimalSize");
+    }
+    if (payload_sum == 0 && payload_size > kTcpHdrMinimalSize) {
+      throw std::invalid_argument(
+          "We don't have payload sum for non-empty payload");
+    }
+
+    uint_fast32_t tcp_sum = partial_sum_for_checksum_;
+    tcp_sum += static_cast<uint16_t>(payload_size);
+
+    // NOTE: the left Tcp Segment part here
+    tcp_sum += static_cast<uint16_t>(seq >> 16);
+    tcp_sum += static_cast<uint16_t>(seq & 0xFFFF);
+
+    tcp_sum += static_cast<uint16_t>(ack >> 16);
+    tcp_sum += static_cast<uint16_t>(ack & 0xFFFF);
+
+    // TCP Flags
+    tcp_sum += tcp[13];
+
+    if (payload_sum)
+      tcp_sum += payload_sum;
+
+    tcp_sum = (tcp_sum & UINT16_MAX) + (tcp_sum >> 16);
+    tcp_sum = (tcp_sum & UINT16_MAX) + (tcp_sum >> 16);
+
+    *reinterpret_cast<uint16_t *>(std::data(tcp) + 16)
+        = htons(static_cast<uint16_t>(~tcp_sum));
+  }
+
 public:
   using TcpConnectionCtorArgs = std::tuple<const AddrType &, uint_fast16_t,
                                            const AddrType &, uint_fast16_t>;
@@ -306,9 +410,8 @@ public:
                 const AddrType &remote_addr, uint_fast16_t remote_port)
       : state_(TcpConnectionState::LISTEN), remote_addr_(remote_addr),
         remote_port_(remote_port), ip_hdr_tmpl_{}, tcp_hdr_tmpl_{},
-        partial_sum_for_checksum_(0),
-        initial_sequenceN(0),
-        sequenceN(0), ackN(0)
+        partial_sum_for_checksum_(0), initial_sequenceN_(0), sequenceN(0),
+        ackN(0)
   {
     typename AddrType::bytes_type l_addr_nd{ local_addr.to_bytes() };
     typename AddrType::bytes_type r_addr_nd{ remote_addr.to_bytes() };
@@ -345,10 +448,11 @@ public:
   TcpConnection(TcpConnection &&) = default;
   TcpConnection &operator=(TcpConnection &&) = default;
 
-  virtual void SetPacketSeqAck(NetPacket &packet, uint_fast32_t seq, uint_fast32_t ack)
+  virtual void
+  SetPacketSeqAck(NetPacket &packet, uint_fast32_t seq, uint_fast32_t ack)
   {
-      packet.meta.data[0] = seq;
-      packet.meta.data[1] = ack;
+    packet.meta.data[0] = seq;
+    packet.meta.data[1] = ack;
   }
 
 #if 0
@@ -406,198 +510,153 @@ public:
 
   virtual void Established() {};
 
-  // We don't handle the checksum here
-  virtual bool
-  FillIpTcpHdr(TcpPacketType packetType, NetPacket &packet,
-               std::size_t payload_size,
-               uint_fast32_t seq, uint_fast32_t ack,
-               uint_fast32_t ttl)
+  /**
+   * Handle all the case that IP and TCP headers with or without payload
+   * in a single NetPacket.
+   */
+  virtual void
+  FillPacketIpTcpHdr(TcpPacketType packet_type, NetPacket &packet,
+                     uint_fast32_t seq, uint_fast32_t ack, uint_fast32_t ttl)
   {
-    std::size_t ip_hdr_size;
-    auto hdr = packet.GetData();
+    constexpr std::size_t kIpTcpHdrMinimalSize
+        = kIPHdrSize + kTcpHdrMinimalSize;
 
-    switch (packetType) {
-    case TcpPacketType::ACK:
-      if (payload) {
-        ip_hdr_size = ConstructIpHdr(hdr, kTcpHdrMinimalSize + payload_size, ttl);
-      } else {
-        ip_hdr_size = ConstructIpHdr(hdr, kTcpHdrMinimalSize, ttl);
+    auto bytes_used = packet.GetUsedBytes();
+    if (bytes_used <= kIpTcpHdrMinimalSize) {
+      throw std::invalid_argument(
+          "packet is too small or reset bytes_used property");
+    }
+
+    std::size_t payload_size;
+    if (bytes_used > 0)
+      payload_size = bytes_used - kIpTcpHdrMinimalSize;
+    else
+      payload_size = 0;
+
+    auto success
+        = FillIpTcpHdr(packet_type, packet, payload_size, seq, ack, ttl);
+    if (!success) {
+      throw std::runtime_error("Failed to fill IP and TCP headers");
+    }
+
+    auto tcp = packet.GetData().subspan(kIPHdrSize, kTcpHdrMinimalSize);
+    if constexpr (Policy != CheckSumPolicy::None) {
+      uint_fast32_t payload_sum = 0;
+      if (payload_size > 0) {
+        payload_sum = InternetSum(
+            packet.GetData().subspan(kIpTcpHdrMinimalSize, payload_size));
       }
-      break;
-    default:
-      if (payload_size)
-          return false;
-      ip_hdr_size = ConstructIpHdr(hdr, kTcpHdrMinimalSize, ttl);
-      break;
+      CompleteTcpCheckSum(tcp, payload_size, seq, ack, payload_sum);
     }
-
-    auto tcp = hdr.subspan(ip_hdr_size);
-    std::copy(tcp_hdr_tmpl_.cbegin(), tcp_hdr_tmpl_.cend(), tcp.begin());
-    auto data = std::data(tcp);
-
-    // Sequence number
-    *reinterpret_cast<uint32_t *>(data + 4) = htonl(seq);
-    // Acknowledgment number
-    *reinterpret_cast<uint32_t *>(data + 8) = htonl(ack);
-
-    switch (packetType) {
-    case TcpPacketType::SYN:
-      data[13] = 0x02; // Flag
-      break;
-    case TcpPacketType::SYN_ACK:
-      data[13] = 0x12; // Flags
-      break;
-    case TcpPacketType::ACK:
-      data[13] = 0x10; // Flags
-      break;
-    case TcpPacketType::FIN:
-      data[13] = 0x01; // Flags
-      break;
-    case TcpPacketType::FIN_ACK:
-      data[13] = 0x11; // Flags
-      break;
-    case TcpPacketType::RST:
-      data[13] = 0x04; // Flags (RST)
-      break;
-    default:
-      throw std::invalid_argument("Invalid TcpPacketType");
-    }
-
-    return true;
   }
 
   template <NetPacketWrapper PacketContainer>
-  virtual void
-  FillPacketIpTcpHdr(TcpPacketType packetType,
-                     PacketContainer &packets,
-                     uint_fast32_t seq = 0, uint_fast32_t ack = 0,
-                     uint_fast32_t ttl = 0)
+  void
+  AssemblePacketHeaders(TcpPacketType packet_type, PacketContainer &packets,
+                        uint_fast32_t seq = 0, uint_fast32_t ack = 0,
+                        uint_fast32_t ttl = 0)
   {
-    if constexpr (NetPacketContainer<PacketContainer>) {
-        auto it = std::begin(packets);
-        auto end = std::end(packets);
+    constexpr std::size_t kIpTcpHdrMinimalSize
+        = kIPHdrSize + kTcpHdrMinimalSize;
 
-        if (it == end) {
-            // empty container
-            return;
+    if constexpr (NetPacketContainer<PacketContainer>) {
+      auto it = std::begin(packets);
+      auto end = std::end(packets);
+
+      if (it == end) {
+        // empty container
+        return;
+      }
+
+      if (std::size(packets) == 1) {
+        auto packet = *it;
+        if constexpr (requires { packet->GetUsedBytes(); }) {
+          FillPacketIpTcpHdr(packet_type, *packet, seq, ack, ttl);
+        } else if constexpr (requires { packet.GetUsedBytes(); }) {
+          FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
         }
 
-        auto total_bytes_used = std::accumulate(
-            it, end, std::size_t(0),
-            [] (std::size_t sum, auto &packet) {
-                if constexpr (requires { packet->get(); } || requires { *packet; }) {
-                    return sum + packet->GetUsedBytes();
-                } else {
-                    return sum + packet.GetUsedBytes();
-                }
-            });
+        return;
+      }
 
+      std::size_t subseq_payload_size = 0;
+      // For later TCP checksum calculation
+      uint_fast32_t payload_sum = 0;
+
+      for (auto &packet : packets) {
+        if (packet == it) {
+          continue;
+        } else {
+          if constexpr (requires { packet->get(); } || requires { *packet; }) {
+            subseq_payload_size += packet->GetUsedBytes();
+            if constexpr (Policy != CheckSumPolicy::None) {
+              payload_sum += InternetSum(
+                  packet->GetData().subspan(0, packet->GetUsedBytes()));
+            }
+          } else if constexpr (requires { packet.GetUsedBytes(); }) {
+            subseq_payload_size += packet.GetUsedBytes();
+            if constexpr (Policy != CheckSumPolicy::None) {
+              payload_sum += InternetSum(
+                  packet.GetData().subspan(0, packet.GetUsedBytes()));
+            }
+          }
+          // we are done with subsequent packets
+        }
+      }
+
+      if (subseq_payload_size > 0) {
+        // NOTE: We don't support first packet with payload in this case
+        auto packet = *it;
+
+        bool success;
+        if constexpr (requires { packet->GetUsedBytes(); }) {
+          success = FillIpTcpHdr(packet_type, *packet, subseq_payload_size,
+                                 seq, ack, ttl);
+
+        } else if constexpr (requires { packet.GetUsedBytes(); }) {
+          success = FillIpTcpHdr(packet_type, packet, subseq_payload_size, seq,
+                                 ack, ttl);
+        }
+        if (!success) {
+          throw std::runtime_error("Failed to fill IP and TCP headers");
+        }
+
+        if constexpr (Policy != CheckSumPolicy::None) {
+          std::span<uint8_t> tcp;
+          if constexpr (requires { packet->GetUsedBytes(); }) {
+            tcp = (packet->GetData()).subspan(kIPHdrSize, kTcpHdrMinimalSize);
+          } else if constexpr (requires { packet.GetUsedBytes(); }) {
+            tcp = (packet.GetData()).subspan(kIPHdrSize, kTcpHdrMinimalSize);
+          }
+
+          CompleteTcpCheckSum(tcp, kTcpHdrMinimalSize + subseq_payload_size,
+                              seq, ack, payload_sum);
+        }
+      } else {
+        // Only first packet should be available
+        auto packet = *it;
+        if constexpr (requires { packet->GetUsedBytes(); }) {
+          FillPacketIpTcpHdr(packet_type, *packet, seq, ack, ttl);
+        } else if constexpr (requires { packet.GetUsedBytes(); }) {
+          FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
+        }
+      }
     } else {
-		// Single packet case - handle both reference and pointer types
-		if constexpr (requires { packets->GetUsedBytes(); }) {
-		  // Smart pointer case
-		  auto bytes_used = packets->GetUsedBytes();
-		  // FIXME: remove the IP header size
-		  if (bytes_used > 0)
-			FillIpTcpHdr(*packets, bytes_used - kTcpHdrMinimalSize, packetType, seq, ack, ttl);
-		  else
-			FillIpTcpHdr(*packets, 0, packetType, seq, ack, ttl);
-		} 
-		else if constexpr (requires { packets.GetUsedBytes(); }) {
-		  // Reference case
-		  auto bytes_used = packets.GetUsedBytes();
-		  // FIXME: remove the IP header size
-		  if (bytes_used > 0)
-			FillIpTcpHdr(packets, bytes_used - kTcpHdrMinimalSize, packetType, seq, ack, ttl);
-		  else
-			FillIpTcpHdr(packets, 0, packetType, seq, ack, ttl);
-		}
-    }
-
-    bool success = false;
-    switch (packetType) {
-    case TcpPacketType::ACK:
-      if (payload) {
-        success = ConstructIpHdr(hdr, payload->GetUsedBytes(), ttl);
-      } else {
-        success = ConstructIpHdr(hdr, 0, ttl);
-      }
-      break;
-    default:
-      if (payload) {
-        payload.reset();
-      }
-      success = ConstructIpHdr(hdr, 0, ttl);
-      break;
-    }
-
-    if (!success)
-      throw std::logic_error("can't fill IP header");
-
-    auto ip_hdr_size = hdr.GetUsedBytes();
-
-    auto tcp = hdr.GetData().subspan(hdr.GetUsedBytes());
-    std::copy(tcp_hdr_tmpl_.cbegin(), tcp_hdr_tmpl_.cend(), tcp.begin());
-    auto data = tcp.data();
-
-    // Sequence number
-    *reinterpret_cast<uint32_t *>(data + 4) = htonl(seq);
-    // Acknowledgment number
-    *reinterpret_cast<uint32_t *>(data + 8) = htonl(ack);
-
-    switch (packetType) {
-    case TcpPacketType::SYN:
-      data[13] = 0x02; // Flag
-      break;
-    case TcpPacketType::SYN_ACK:
-      data[13] = 0x12; // Flags
-      break;
-    case TcpPacketType::ACK:
-      data[13] = 0x10; // Flags
-      break;
-    case TcpPacketType::FIN:
-      data[13] = 0x01; // Flags
-      break;
-    case TcpPacketType::FIN_ACK:
-      data[13] = 0x11; // Flags
-      break;
-    case TcpPacketType::RST:
-      data[13] = 0x04; // Flags (RST)
-      break;
-    default:
-      throw std::invalid_argument("Invalid TcpPacketType");
-    }
-
-    if constexpr (Policy != CheckSumPolicy::None) {
-      uint32_t tcp_sum = partial_sum_for_checksum_;
-      const std::size_t payload_size = payload ? payload->GetUsedBytes() : 0;
-      tcp_sum += kTcpHdrMinimalSize + payload_size;
-
-      // NOTE: the left Tcp Segment part here
-      tcp_sum += static_cast<uint16_t>(seq >> 16);
-      tcp_sum += static_cast<uint16_t>(seq & 0xFFFF);
-
-      tcp_sum += static_cast<uint16_t>(ack >> 16);
-      tcp_sum += static_cast<uint16_t>(ack & 0xFFFF);
-
-      tcp_sum += static_cast<uint_fast32_t>(data[13]);
-
-      if (payload) {
-        auto tcp_checksum = InternetChecksum(payload->GetData(), tcp_sum);
-        *reinterpret_cast<uint16_t *>(data + 16) = htons(tcp_checksum);
-      } else {
-        tcp_sum = (tcp_sum & 0xFFFF) + (tcp_sum >> 16);
-        tcp_sum = (tcp_sum & 0xFFFF) + (tcp_sum >> 16);
-        *reinterpret_cast<uint16_t *>(data + 16)
-            = htons(static_cast<uint16_t>(~tcp_sum));
+      // Single packet case - handle both reference and pointer types
+      if constexpr (requires { packets->GetUsedBytes(); }) {
+        // Smart pointer case
+        FillPacketIpTcpHdr(packet_type, *packets, seq, ack, ttl);
+      } else if constexpr (requires { packets.GetUsedBytes(); }) {
+        // Reference case
+        FillPacketIpTcpHdr(packet_type, packets, seq, ack, ttl);
       }
     }
-
-    hdr.SetUsedBytes(ip_hdr_size + kTcpHdrMinimalSize);
   }
 
-  bool SetInitialSequenceNumber(uint_fast32_t num) {
-      initial_sequenceN_ = num;
+  bool
+  SetInitialSequenceNumber(uint_fast32_t num)
+  {
+    initial_sequenceN_ = num;
   }
 
   void
@@ -897,15 +956,6 @@ public:
       return it->RemoveConnection(addr, port);
     }
     return false;
-  }
-
-  virtual uint32_t
-  InitialConnSeq([[maybe_unused]] const AddrType &local_addr,
-                 [[maybe_unused]] const uint_fast16_t local_port,
-                 [[maybe_unused]] const AddrType &remote_addr,
-                 [[maybe_unused]] const uint_fast16_t remote_port)
-  {
-    return 0;
   }
 };
 

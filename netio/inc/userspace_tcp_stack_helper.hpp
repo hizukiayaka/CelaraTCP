@@ -252,16 +252,19 @@ public:
       auto conn = service->GetConnection(src_addr, src_port);
       if (conn) {
         if (conn->state_ == TcpConnectionState::SYN_SENT) {
-          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
           auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 8));
-          conn->UpdateRecvSeq(TcpPacketType::SYN_ACK, seqNum);
+          // TODO: check ack is += 1 of sent SYN seq num
+
+          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
+          // TODO: save remote ISN
 
           auto reply = hdr_pool_->allocate();
-          conn->FillPacketIpTcpHdr(TcpPacketType::ACK, *reply);
+          conn->AssemblePacketHeaders(TcpPacketType::ACK, reply, ack_num + 1,
+                                      seq_num + 1, 0);
 
           auto ret = co_await tx_callback_(std::move(reply->GetConstBuf()));
           if (ret >= reply->GetUsedBytes()) {
-            conn->UpdateSentSeq(TcpPacketType::ACK, 0, 1);
+            // TODO: conn->UpdateSentSeq(TcpPacketType::ACK, 0, 1);
 
             conn->state_ = TcpConnectionState::ESTABLISHED;
             conn->FreshActivity();
@@ -306,8 +309,9 @@ public:
           co_return TcpStackState::ERR_ARGUMENT;
         }
 
-        auto ackNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 8));
-        conn->UpdateRecvAck(TcpPacketType::ACK, ackNum);
+        auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 8));
+        // FIXME
+        // conn->UpdateRecvAck(TcpPacketType::ACK, ackNum);
 
         auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
 
@@ -343,10 +347,12 @@ public:
             payloadPackets.swap(*pit);
           }
 
-          conn->UpdateRecvSeq(TcpPacketType::ACK, seqNum, payload_size);
+          // FIXME
+          // conn->UpdateRecvSeq(TcpPacketType::ACK, seqNum, payload_size);
           conn->submitRxChann(std::move(payloadPackets));
         } else {
-          conn->UpdateRecvSeq(TcpPacketType::ACK, seqNum);
+          // FIXME
+          // conn->UpdateRecvSeq(TcpPacketType::ACK, seqNum);
         }
 
         co_return TcpStackState::SUCCESS;
@@ -362,17 +368,25 @@ public:
       }
 
       conn->state_ = TcpConnectionState::SYN_RECEIVED;
-      auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
-      conn->UpdateRecvSeq(TcpPacketType::SYN, seqNum);
+
+      auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
+      // TODO: set remote initial seq num
+
+      auto ack_num = seq_num + 1;
 
       auto reply = hdr_pool_->allocate();
-      conn->FillPacketIpTcpHdr(TcpPacketType::SYN_ACK, *reply);
+      // Generate ISN
+      seq_num = this->GenerateInitialSequenceNumber(dst_addr, dst_port,
+                                                    src_addr, src_port);
+      conn->AssemblePacketHeaders(TcpPacketType::SYN_ACK, reply, seq_num,
+                                  ack_num, 0);
 
       auto ret = co_await tx_callback_(std::move(reply->GetConstBuf()));
       if (ret >= reply->GetUsedBytes()) {
-        seqNum = this->InitialConnSeq(service->GetLocalAddr(),
-                                      service->GetPort(), src_addr, src_port);
+        // FIXME
+#if 0
         conn->UpdateSentSeq(TcpPacketType::SYN_ACK, seqNum, 1);
+#endif
         conn->FreshActivity();
 
         co_return TcpStackState::SUCCESS;
