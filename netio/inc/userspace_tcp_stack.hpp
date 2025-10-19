@@ -16,7 +16,6 @@ extern "C"
 #include <concepts>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <forward_list>
 #include <memory>
 #include <numeric>
@@ -130,15 +129,13 @@ protected:
    * data offset, reserved, window size fields
    */
   uint_fast32_t partial_sum_for_checksum_;
+  // For IPv4 checksum calculation
+  uint_fast32_t partial_ipv4_sum_for_checksum_;
 
   // The initial outoging sequence number
   uint_fast32_t initial_sequenceN_;
-  // The outgoing sequence number
-  uint32_t sequenceN;
-  // The outgoing ACK number
-  uint32_t ackN;
-
-  uint_fast8_t ip_ttl_value_;
+  // The remote initial sequence number
+  uint_fast32_t remote_initial_sequenceN_;
 
   std::chrono::time_point<std::chrono::steady_clock> last_activity_;
 
@@ -167,7 +164,20 @@ protected:
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
       = 0>
-  static void
+  static uint_fast32_t
+  TcpPseudoPartialSum(uint_fast32_t addr_sum)
+  {
+    uint_fast32_t sum = IPPROTO_TCP;
+    sum += addr_sum;
+    // Partial not included Tcp Segment length
+    return sum;
+  }
+
+  template <
+      typename T = AddrType,
+      typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
+      = 0>
+  void
   FillIpHdrTmpl(std::span<uint8_t> buf, AddrType::bytes_type &local_addr_ND,
                 AddrType::bytes_type &remote_addr_ND) noexcept
   {
@@ -185,8 +195,21 @@ protected:
               buf.subspan(12).begin());
     std::copy(remote_addr_ND.cbegin(), remote_addr_ND.cend(),
               buf.subspan(16).begin());
+
+    if constexpr (Policy == CheckSumPolicy::IP
+                  || Policy == CheckSumPolicy::IP_TCP)
+    {
+      partial_ipv4_sum_for_checksum_ = InternetSum(buf);
+    }
   }
 
+  /**
+   * Constructs the IPv4 header in the provided buffer.
+   * @param hdr The buffer to write the IPv4 header into.
+   * @param payload_size The size of the payload that will follow the IP
+   * header.
+   * @param ttl The Time To Live (TTL) value for the packet.
+   */
   template <
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
@@ -202,8 +225,9 @@ protected:
     std::copy(ip_hdr_tmpl_.cbegin(), ip_hdr_tmpl_.cend(), hdr.begin());
 
     // Total Length
+    auto total_length = kIpv4HdrSize + payload_size;
     *reinterpret_cast<uint16_t *>(data + 2)
-        = htons(kIpv4HdrSize + payload_size);
+        = htons(static_cast<uint16_t>(total_length));
     // TTL
     if (ttl == 0)
       data[8] = kBSDIpTTLValue;
@@ -213,24 +237,19 @@ protected:
     if constexpr (Policy == CheckSumPolicy::IP
                   || Policy == CheckSumPolicy::IP_TCP)
     {
-      uint16_t csum = InternetChecksum(hdr.subspan(0, kIpv4HdrSize));
-      *reinterpret_cast<uint16_t *>(data + 10) = htons(csum);
+      uint_fast32_t sum = partial_ipv4_sum_for_checksum_;
+      sum += static_cast<uint16_t>(total_length);
+      // TTL
+      sum += static_cast<uint16_t>(data[8]) << 8;
+
+      // One time fold should be enough, the maximum addition is 65535 + 255
+      uint_fast16_t csum = (static_cast<uint16_t>(sum & UINT16_MAX)
+                            + static_cast<uint16_t>(sum >> 16));
+
+      *reinterpret_cast<uint16_t *>(data + 10) = htons(~csum);
     }
 
     return kIpv4HdrSize;
-  }
-
-  template <
-      typename T = AddrType,
-      typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
-      = 0>
-  static uint_fast32_t
-  TcpPseudoPartialSum(uint_fast32_t addr_sum)
-  {
-    uint_fast32_t sum = IPPROTO_TCP;
-    sum += addr_sum;
-    // Partial not included Tcp Segment length
-    return sum;
   }
 
   // IPv6 specialization
@@ -238,7 +257,7 @@ protected:
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
       = 0>
-  static void
+  void
   FillIpHdrTmpl(std::span<uint8_t> buf, AddrType::bytes_type &local_addr_ND,
                 AddrType::bytes_type &remote_addr_ND) noexcept
   {
@@ -263,6 +282,13 @@ protected:
               buf.subspan(24).begin());
   }
 
+  /**
+   * Constructs the IPv6 header in the provided buffer.
+   * @param hdr The buffer to write the IPv6 header into.
+   * @param payload_size The size of the payload that will follow the IP
+   * header.
+   * @param ttl The Time To Live (TTL) value for the packet.
+   */
   template <
       typename T = AddrType,
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
@@ -299,7 +325,7 @@ protected:
   {
     // https://www.ietf.org/rfc/rfc2460.txt
     // 8.1 Upper-Layer Checksums
-    uint_fast32_t sum = IPPROTO_TCP << 8;
+    uint_fast32_t sum = IPPROTO_TCP;
     sum += addr_sum;
     // Partial not included Tcp Segment length
     return sum;
@@ -410,8 +436,8 @@ public:
                 const AddrType &remote_addr, uint_fast16_t remote_port)
       : state_(TcpConnectionState::LISTEN), remote_addr_(remote_addr),
         remote_port_(remote_port), ip_hdr_tmpl_{}, tcp_hdr_tmpl_{},
-        partial_sum_for_checksum_(0), initial_sequenceN_(0), sequenceN(0),
-        ackN(0)
+        partial_sum_for_checksum_(0), partial_ipv4_sum_for_checksum_(0),
+        initial_sequenceN_(0), remote_initial_sequenceN_(0)
   {
     typename AddrType::bytes_type l_addr_nd{ local_addr.to_bytes() };
     typename AddrType::bytes_type r_addr_nd{ remote_addr.to_bytes() };
@@ -455,61 +481,6 @@ public:
     packet.meta.data[1] = ack;
   }
 
-#if 0
-  virtual void
-  UpdateRecvSeq(TcpPacketType type, uint32_t seq,
-                uint32_t payload_size = 0) noexcept
-  {
-    switch (type) {
-    case TcpPacketType::SYN:
-    case TcpPacketType::SYN_ACK:
-      if (payload_size == 0) {
-        payload_size = 1;
-      }
-      ackN = seq + payload_size;
-
-      break;
-    case TcpPacketType::ACK:
-      break;
-    default:
-      break;
-    }
-  }
-
-  virtual void
-  UpdateRecvAck([[maybe_unused]] TcpPacketType type,
-                [[maybe_unused]] uint32_t ack) noexcept
-  {
-    // do nothing
-  }
-
-  virtual void
-  UpdateSentSeq(TcpPacketType type, uint32_t seq = 0,
-                uint32_t payload_size = 0) noexcept
-  {
-    switch (type) {
-    case TcpPacketType::SYN:
-    case TcpPacketType::SYN_ACK:
-      if (payload_size == 0) {
-        payload_size = 1;
-      }
-      if (seq == 0) {
-        sequenceN += payload_size;
-      } else {
-        sequenceN = seq + payload_size;
-      }
-
-      break;
-    case TcpPacketType::ACK:
-      break;
-    default:
-      break;
-    }
-  }
-#endif
-
-  virtual void Established() {};
-
   /**
    * Handle all the case that IP and TCP headers with or without payload
    * in a single NetPacket.
@@ -522,9 +493,11 @@ public:
         = kIPHdrSize + kTcpHdrMinimalSize;
 
     auto bytes_used = packet.GetUsedBytes();
-    if (bytes_used <= kIpTcpHdrMinimalSize) {
+    if (bytes_used > 0 && bytes_used <= kIpTcpHdrMinimalSize) {
       throw std::invalid_argument(
-          "packet is too small or reset bytes_used property");
+          "packet is too small or didn't reset bytes_used property");
+    } else if (packet.GetMaximumSize() < kIpTcpHdrMinimalSize) {
+      throw std::invalid_argument("packet is too small");
     }
 
     std::size_t payload_size;
@@ -546,7 +519,9 @@ public:
         payload_sum = InternetSum(
             packet.GetData().subspan(kIpTcpHdrMinimalSize, payload_size));
       }
-      CompleteTcpCheckSum(tcp, payload_size, seq, ack, payload_sum);
+      auto ip_payload_size = payload_size + kTcpHdrMinimalSize;
+
+      CompleteTcpCheckSum(tcp, ip_payload_size, seq, ack, payload_sum);
     }
   }
 
@@ -556,26 +531,28 @@ public:
                         uint_fast32_t seq = 0, uint_fast32_t ack = 0,
                         uint_fast32_t ttl = 0)
   {
-    constexpr std::size_t kIpTcpHdrMinimalSize
-        = kIPHdrSize + kTcpHdrMinimalSize;
+    auto get_packet_ref = []<typename P>(P &&packet_like) -> NetPacket & {
+      if constexpr (requires { packet_like->GetUsedBytes(); }) {
+        return *packet_like; // It's a smart or raw pointer
+      } else {
+        return packet_like; // It's a value or reference
+      }
+    };
 
     if constexpr (NetPacketContainer<PacketContainer>) {
-      auto it = std::begin(packets);
-      auto end = std::end(packets);
+      auto p_begin = std::begin(packets);
+      auto p_end = std::end(packets);
 
-      if (it == end) {
+      if (p_begin == p_end) {
         // empty container
         return;
       }
 
-      if (std::size(packets) == 1) {
-        auto packet = *it;
-        if constexpr (requires { packet->GetUsedBytes(); }) {
-          FillPacketIpTcpHdr(packet_type, *packet, seq, ack, ttl);
-        } else if constexpr (requires { packet.GetUsedBytes(); }) {
-          FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
-        }
-
+      auto next_it = p_begin;
+      if (++next_it == p_end) {
+        // single packet case
+        auto &packet = get_packet_ref(*p_begin);
+        FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
         return;
       }
 
@@ -583,80 +560,77 @@ public:
       // For later TCP checksum calculation
       uint_fast32_t payload_sum = 0;
 
-      for (auto &packet : packets) {
-        if (packet == it) {
-          continue;
-        } else {
-          if constexpr (requires { packet->get(); } || requires { *packet; }) {
-            subseq_payload_size += packet->GetUsedBytes();
-            if constexpr (Policy != CheckSumPolicy::None) {
-              payload_sum += InternetSum(
-                  packet->GetData().subspan(0, packet->GetUsedBytes()));
-            }
-          } else if constexpr (requires { packet.GetUsedBytes(); }) {
-            subseq_payload_size += packet.GetUsedBytes();
-            if constexpr (Policy != CheckSumPolicy::None) {
-              payload_sum += InternetSum(
-                  packet.GetData().subspan(0, packet.GetUsedBytes()));
-            }
-          }
-          // we are done with subsequent packets
+      for (auto it = next_it; it != p_end; ++it) {
+        auto &packet = get_packet_ref(*it);
+
+        subseq_payload_size += packet.GetUsedBytes();
+        if constexpr (Policy != CheckSumPolicy::None) {
+          payload_sum += InternetSum(
+              packet.GetData().subspan(0, packet.GetUsedBytes()));
         }
+        // we are done with subsequent packets
       }
 
       if (subseq_payload_size > 0) {
         // NOTE: We don't support first packet with payload in this case
-        auto packet = *it;
+        auto &packet = get_packet_ref(*p_begin);
 
-        bool success;
-        if constexpr (requires { packet->GetUsedBytes(); }) {
-          success = FillIpTcpHdr(packet_type, *packet, subseq_payload_size,
-                                 seq, ack, ttl);
-
-        } else if constexpr (requires { packet.GetUsedBytes(); }) {
-          success = FillIpTcpHdr(packet_type, packet, subseq_payload_size, seq,
-                                 ack, ttl);
-        }
+        auto success = FillIpTcpHdr(packet_type, packet, subseq_payload_size,
+                                    seq, ack, ttl);
         if (!success) {
           throw std::runtime_error("Failed to fill IP and TCP headers");
         }
 
         if constexpr (Policy != CheckSumPolicy::None) {
-          std::span<uint8_t> tcp;
-          if constexpr (requires { packet->GetUsedBytes(); }) {
-            tcp = (packet->GetData()).subspan(kIPHdrSize, kTcpHdrMinimalSize);
-          } else if constexpr (requires { packet.GetUsedBytes(); }) {
-            tcp = (packet.GetData()).subspan(kIPHdrSize, kTcpHdrMinimalSize);
-          }
+          auto tcp
+              = (packet.GetData()).subspan(kIPHdrSize, kTcpHdrMinimalSize);
 
           CompleteTcpCheckSum(tcp, kTcpHdrMinimalSize + subseq_payload_size,
                               seq, ack, payload_sum);
         }
       } else {
         // Only first packet should be available
-        auto packet = *it;
-        if constexpr (requires { packet->GetUsedBytes(); }) {
-          FillPacketIpTcpHdr(packet_type, *packet, seq, ack, ttl);
-        } else if constexpr (requires { packet.GetUsedBytes(); }) {
-          FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
-        }
+        auto &packet = get_packet_ref(*p_begin);
+
+        FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
       }
     } else {
       // Single packet case - handle both reference and pointer types
-      if constexpr (requires { packets->GetUsedBytes(); }) {
-        // Smart pointer case
-        FillPacketIpTcpHdr(packet_type, *packets, seq, ack, ttl);
-      } else if constexpr (requires { packets.GetUsedBytes(); }) {
-        // Reference case
-        FillPacketIpTcpHdr(packet_type, packets, seq, ack, ttl);
-      }
+      auto &packet = get_packet_ref(packets);
+      FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
     }
   }
 
-  bool
-  SetInitialSequenceNumber(uint_fast32_t num)
+  virtual std::size_t SendReply(TcpPacketType, uint_fast32_t seq,
+                                uint_fast32_t ack, uint_fast32_t ttl)
+      = 0;
+
+  virtual void Established(uint_fast32_t cur_seq_num,
+                           uint_fast32_t cur_ack_num)
+      = 0;
+
+  uint_fast32_t
+  GetInitialSequenceNumber() const noexcept
+  {
+    return initial_sequenceN_;
+  }
+
+  uint_fast32_t
+  GetRemoteInitialSequenceNumber() const noexcept
+  {
+    return remote_initial_sequenceN_;
+  }
+
+  void
+  SetInitialSequenceNumber(uint_fast32_t num) noexcept
   {
     initial_sequenceN_ = num;
+  }
+
+  void
+  SetRemoteInitialSequenceNumber(uint_fast32_t num) noexcept
+  {
+    remote_initial_sequenceN_ = num;
   }
 
   void
@@ -666,17 +640,7 @@ public:
   }
 };
 
-template <typename Factory, typename AddrType>
-concept FactoryForTcpConnect = requires(Factory f, AddrType a, uint_fast16_t p,
-                                        AddrType b, uint_fast16_t q)
-{
-  { f(a, p, b, q) };
-}
-&&std::is_constructible_v<TcpConnection<AddrType>, AddrType, uint_fast16_t,
-                          AddrType, uint_fast16_t>;
-
 template <typename AddrType, typename TcpConnFactory>
-// requires FactoryForTcpConnect<TcpConnFactory, AddrType>
 class TcpService
 {
 protected:
@@ -686,7 +650,7 @@ protected:
 
   using TcpConnectionT
       = std::invoke_result_t<decltype(conn_factory_), AddrType, uint_fast16_t,
-                             AddrType, uint_fast16_t>;
+                             AddrType, uint_fast16_t>::element_type;
 
   std::forward_list<std::shared_ptr<TcpConnectionT> > connections_list_;
 
@@ -722,8 +686,7 @@ public:
                                 && c->remote_port_ == remote_port;
                        });
     if (it == connections_list_.cend()) {
-      auto c = conn_factory_(local_addr_, port_, remote_addr, remote_port);
-      auto conn = std::make_shared<TcpConnectionT>(std::move(c));
+      auto conn = conn_factory_(local_addr_, port_, remote_addr, remote_port);
       connections_list_.push_front(conn);
       return conn;
     } else {
@@ -784,9 +747,7 @@ class UserspaceTcpStack
 {
 protected:
   std::mutex mutex_;
-  // Remove connections_list_ from here
   std::forward_list<std::shared_ptr<TcpServiceT> > services_;
-  AddrType local_addr_;
 
 protected:
   template <
@@ -794,10 +755,10 @@ protected:
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
       = 0>
   std::pair<bool, std::size_t>
-  ParseIpHeader(std::shared_ptr<NetPacket> packet, std::size_t &packet_length,
-                T &src_addr, T &dst_addr)
+  ParseIpHeader(NetPacket &packet, std::size_t &packet_length, T &src_addr,
+                T &dst_addr)
   {
-    auto data = packet->GetData().data();
+    auto data = std::data(packet.GetData());
 
     packet_length = static_cast<std::size_t>(
         ntohs(*reinterpret_cast<const uint16_t *>(data + 2)));
@@ -818,18 +779,20 @@ protected:
       typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
       = 0>
   std::pair<bool, std::size_t>
-  ParseIpHeader(std::shared_ptr<NetPacket> packet, std::size_t &packet_length,
-                T &src_addr, T &dst_addr)
+  ParseIpHeader(NetPacket &packet, std::size_t &packet_length, T &src_addr,
+                T &dst_addr)
   {
-    auto data = packet->GetData().data();
+    auto data = std::data(packet.GetData());
 
     packet_length = static_cast<std::size_t>(
         ntohs(*reinterpret_cast<const uint16_t *>(data + 4)));
+
     asio::ip::address_v6::bytes_type bytes;
     std::copy(data + 8, data + 24, bytes.begin());
     src_addr = asio::ip::address_v6(bytes);
     std::copy(data + 24, data + 40, bytes.begin());
     dst_addr = asio::ip::address_v6(bytes);
+
     constexpr auto ipHeaderLength = 40; // IPv6 header is always 40 bytes
     return { true, ipHeaderLength };
   }
@@ -878,17 +841,10 @@ protected:
     return hash;
   }
 
-  UserspaceTcpStack() {}
+  UserspaceTcpStack() : mutex_{}, services_{} {}
   ~UserspaceTcpStack() = default;
 
 public:
-  void
-  SetLocalAddress(const AddrType &addr)
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    local_addr_ = addr;
-  }
-
   bool
   AddService(std::shared_ptr<TcpServiceT> service)
   {

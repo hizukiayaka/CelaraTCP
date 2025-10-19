@@ -115,7 +115,6 @@ run2()
 
   auto tcp_stack = netio::MakeAsyncTcpStack<asio::ip::address_v4>(
       stream, hdr_pool, conn_factory);
-  tcp_stack.SetLocalAddress(net1.address());
   tcp_stack.AddSimpleService(5162);
 
   asio::co_spawn(ioc, work(hdr_pool, stream, tcp_stack), asio::detached);
@@ -124,23 +123,46 @@ run2()
 }
 #endif
 
+template <typename AddrType, typename NetworkIOObjectT,
+          netio::CheckSumPolicy Policy = netio::CheckSumPolicy::IP_TCP>
+class DummyTcpConnectionChan : public netio::TcpConnection<AddrType, Policy>
+{
+private:
+  std::shared_ptr<NetworkIOObjectT> nout_;
+
+public:
+  DummyTcpConnectionChan(const AddrType &local_addr, uint_fast16_t local_port,
+                         const AddrType &remote_addr,
+                         uint_fast16_t remote_port,
+                         std::shared_ptr<NetworkIOObjectT> net_io)
+      : netio::TcpConnection<AddrType, Policy>(local_addr, local_port,
+                                               remote_addr, remote_port),
+        nout_(std::move(net_io))
+  {
+  }
+
+  ~DummyTcpConnectionChan() override = default;
+
+  void
+  Established(uint_fast32_t, uint_fast32_t) override
+  {
+  }
+
+  virtual std::size_t
+  SendReply(netio::TcpPacketType, uint_fast32_t, uint_fast32_t,
+            uint_fast32_t) override
+  {
+    return 0;
+  }
+};
+
 int
 main(int argc, char *argv[])
 {
   // run2();
-  auto conn_factory =
-      [](const asio::ip::address_v4 &local_addr, uint_fast16_t local_port,
-         const asio::ip::address_v4 &remote_addr, uint_fast16_t remote_port) {
-        return netio::TcpConnection<asio::ip::address_v4>(
-            local_addr, local_port, remote_addr, remote_port);
-      };
 
-  auto serv_factory = [&conn_factory](const asio::ip::address_v4 &local_addr,
-                                      uint_fast16_t local_port) {
-    return std::make_shared<
-        netio::TcpService<asio::ip::address_v4, decltype(conn_factory)> >(
-        std::move(conn_factory), local_addr, local_port);
-  };
+  (void)argc;
+  (void)argv;
 
   asio::io_context ioc;
   auto stream = std::make_shared<asio::posix::stream_descriptor>(ioc);
@@ -151,10 +173,28 @@ main(int argc, char *argv[])
 
   hdr_pool->reserve(20);
 
-  auto tcp_stack = netio::MakeAsyncTcpStack<asio::ip::address_v4>(
-      stream, hdr_pool, serv_factory);
+  auto conn_factory
+      = [&stream, &hdr_pool](const asio::ip::address_v4 &local_addr,
+                             uint_fast16_t local_port,
+                             const asio::ip::address_v4 &remote_addr,
+                             uint_fast16_t remote_port) {
+          return std::make_shared<DummyTcpConnectionChan<
+              asio::ip::address_v4, asio::posix::stream_descriptor> >(
+              local_addr, local_port, remote_addr, remote_port, stream);
+        };
+
+  auto serv_factory = [&conn_factory](const asio::ip::address_v4 &local_addr,
+                                      uint_fast16_t local_port) {
+    return std::make_shared<
+        netio::TcpService<asio::ip::address_v4, decltype(conn_factory)> >(
+        std::move(conn_factory), local_addr, local_port);
+  };
+
+  auto tcp_stack
+      = netio::MakeAsyncTcpStack<asio::ip::address_v4>(serv_factory);
 
   asio::ip::network_v4 net1(asio::ip::make_address_v4("169.254.3.1"), 32);
+  // The correct address should be the peer address of the tun/tap device
   auto serv = serv_factory(net1.address(), 3000);
 
   tcp_stack.AddService(serv);

@@ -9,7 +9,6 @@
 #include <asio/experimental/concurrent_channel.hpp>
 #include <iostream>
 #include <memory>
-#include <recycle/shared_pool.hpp>
 #include <utility>
 
 #include "userspace_tcp_stack.hpp"
@@ -37,21 +36,6 @@ public:
     return NetPacketContainer<PacketContainer>;
   }
 
-#if 0
-  using typename TcpConnection<AddrType>::TcpConnectionCtorArgs;
-
-  TcpConnectionChan(const TcpConnectionCtorArgs &args,
-                    asio::any_io_executor &ex)
-      : TcpConnection<AddrType>(std::apply(
-            [](const auto &...params) {
-              return TcpConnection<AddrType>(params...);
-            },
-            args)),
-        rx_chan_(ex, 32)
-  {
-  }
-#endif
-
   TcpConnectionChan(AddrType local_addr, uint_fast16_t local_port,
                     AddrType remote_addr, uint_fast16_t remote_port,
                     asio::any_io_executor &ex)
@@ -63,6 +47,21 @@ public:
 
   TcpConnectionChan(TcpConnectionChan &&) = default;
   TcpConnectionChan &operator=(TcpConnectionChan &&) = default;
+
+  virtual asio::awaitable<void>
+  AsyncSendReply(TcpPacketType, uint_fast32_t seq, uint_fast32_t ack,
+                 uint_fast32_t ttl)
+      = 0;
+
+  virtual std::size_t
+  SendReply(TcpPacketType, uint_fast32_t seq, uint_fast32_t ack,
+            uint_fast32_t ttl) final
+  {
+    (void)seq;
+    (void)ack;
+    (void)ttl;
+    return 0;
+  }
 
   void
   submitRxChann(PacketContainer &&packets)
@@ -83,32 +82,12 @@ private:
   ChannelType rx_chan_;
 };
 
-using shared_netbuf_pool_t
-    = std::shared_ptr<recycle::shared_pool<NetMemChunk> >;
-
-template <typename AddrType, typename TcpServiceT, typename NetworkIOObjectT>
+template <typename AddrType, typename TcpServiceT>
 class AsyncUserspaceTcpStack : public UserspaceTcpStack<AddrType, TcpServiceT>
 {
-protected:
-  std::shared_ptr<NetworkIOObjectT> nout_;
-  shared_netbuf_pool_t hdr_pool_;
-
-  // Wrapper coroutine for sending packets downstream
-  template <typename ConstBufferSequence>
-  asio::awaitable<std::size_t>
-  tx_callback_(ConstBufferSequence &&bufs)
-  {
-    co_return co_await asio::async_write(*nout_, std::move(bufs),
-                                         asio::use_awaitable);
-  }
 
 public:
-  AsyncUserspaceTcpStack(std::shared_ptr<NetworkIOObjectT> net_io,
-                         shared_netbuf_pool_t hdr_pool)
-      : UserspaceTcpStack<AddrType, TcpServiceT>(), nout_(std::move(net_io)),
-        hdr_pool_(hdr_pool)
-  {
-  }
+  AsyncUserspaceTcpStack() : UserspaceTcpStack<AddrType, TcpServiceT>() {}
 
   ~AsyncUserspaceTcpStack() = default;
 
@@ -150,7 +129,7 @@ public:
                      asio::ip::address_v4::any());
         return false;
       }
-      auto data = packet.GetData().data();
+      auto data = std::data(packet.GetData());
       if (data[0] != 0x45) {
         print_reject("IPv4: wrong version/IHL", data[0], 0,
                      asio::ip::address_v4::any(), asio::ip::address_v4::any());
@@ -194,7 +173,6 @@ public:
                    asio::ip::address_v4());
       return false;
     }
-    std::cout << "Pass" << std::endl;
     return true;
   }
 
@@ -202,17 +180,26 @@ public:
   asio::awaitable<TcpStackState>
   ProcessIncomingPackets(PacketContainer &&packets)
   {
+    auto get_packet_ref = []<typename P>(P &&packet_like) -> NetPacket & {
+      if constexpr (requires { packet_like->GetUsedBytes(); }) {
+        return *packet_like; // It's a smart pointer
+      } else {
+        return packet_like; // It's a value
+      }
+    };
+
     auto total_bytes_used = std::accumulate(
-        packets.cbegin(), packets.cend(), std::size_t(0),
-        [](std::size_t sum, const std::shared_ptr<NetPacket> &packet) {
-          return sum + packet->GetUsedBytes();
+        std::cbegin(packets), std::cend(packets), std::size_t(0),
+        [&get_packet_ref](std::size_t sum, const auto &packet) {
+          return sum + get_packet_ref(packet).GetUsedBytes();
         });
 
-    auto packet = packets.front();
-    bool success;
-    std::size_t ip_payload_offset;
+    auto &packet = get_packet_ref(*std::begin(packets));
+
     std::size_t packet_length;
     AddrType src_addr, dst_addr;
+    bool success;
+    std::size_t ip_payload_offset;
 
     std::tie(success, ip_payload_offset)
         = this->ParseIpHeader(packet, packet_length, src_addr, dst_addr);
@@ -224,7 +211,7 @@ public:
     if (total_bytes_used < payload_offset) {
       co_return TcpStackState::ERR_WRONG_PROTOCOL;
     }
-    if (packet->GetUsedBytes() < payload_offset) {
+    if (packet.GetUsedBytes() < payload_offset) {
       co_return TcpStackState::ERR_WRONG_PROTOCOL;
     }
     /* safely packet checking */
@@ -232,9 +219,9 @@ public:
       co_return TcpStackState::ERR_WRONG_PROTOCOL;
     }
 
-    auto data = packet->GetData().data() + ip_payload_offset;
+    auto tcp = std::data(packet.GetData().subspan(ip_payload_offset));
 
-    auto dst_port = ntohs(*reinterpret_cast<const uint16_t *>(data + 2));
+    auto dst_port = ntohs(*reinterpret_cast<const uint16_t *>(tcp + 2));
     auto it = std::find_if(
         this->services_.begin(), this->services_.end(),
         [dst_port](const std::shared_ptr<TcpServiceT> &service) {
@@ -245,40 +232,42 @@ public:
     }
     auto service = it->get();
 
-    auto src_port = ntohs(*reinterpret_cast<const uint16_t *>(data));
-    auto tcpFlags = static_cast<uint8_t>(data[13]);
-    if (tcpFlags == 0x12) {
+    auto src_port = ntohs(*reinterpret_cast<const uint16_t *>(tcp));
+    auto tcp_flags = static_cast<uint8_t>(tcp[13]);
+    if (tcp_flags == 0x12) {
       // SYN-ACK
       auto conn = service->GetConnection(src_addr, src_port);
       if (conn) {
         if (conn->state_ == TcpConnectionState::SYN_SENT) {
-          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 8));
-          // TODO: check ack is += 1 of sent SYN seq num
+          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
 
-          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
-          // TODO: save remote ISN
+          // TODO: validate ack num accuracy
+          if (ack_num <= conn->GetInitialSequenceNumber()) {
+            co_return TcpStackState::ERR_ARGUMENT;
+          }
 
-          auto reply = hdr_pool_->allocate();
-          conn->AssemblePacketHeaders(TcpPacketType::ACK, reply, ack_num + 1,
-                                      seq_num + 1, 0);
+          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
+          conn->SetRemoteInitialSequenceNumber(seq_num);
 
-          auto ret = co_await tx_callback_(std::move(reply->GetConstBuf()));
-          if (ret >= reply->GetUsedBytes()) {
-            // TODO: conn->UpdateSentSeq(TcpPacketType::ACK, 0, 1);
-
+          try {
+            co_await conn->AsyncSendReply(TcpPacketType::ACK, seq_num + 1,
+                                          ack_num, 0);
             conn->state_ = TcpConnectionState::ESTABLISHED;
             conn->FreshActivity();
-            conn->Established();
-
-            co_return TcpStackState::SUCCESS;
+            conn->Established(ack_num + 1, seq_num + 1);
           }
-          co_return TcpStackState::DROP;
+          catch (...) {
+            co_return TcpStackState::DROP;
+          }
+          co_return TcpStackState::SUCCESS;
         } else {
           co_return TcpStackState::ERR_ARGUMENT;
         }
       }
+
+      // We don't have such connection
       co_return TcpStackState::ERR_ARGUMENT;
-    } else if (tcpFlags == 0x11) {
+    } else if (tcp_flags == 0x11) {
       // FIN-ACK
       auto conn = service->GetConnection(src_addr, src_port);
       if (conn) {
@@ -291,7 +280,7 @@ public:
         }
       }
       co_return TcpStackState::ERR_ARGUMENT;
-    } else if (tcpFlags == 0x10) {
+    } else if (tcp_flags == 0x10) {
       // ACK
       auto conn = service->GetConnection(src_addr, src_port);
       if (conn) {
@@ -301,19 +290,20 @@ public:
         } else if (conn->state_ == TcpConnectionState::SYN_RECEIVED) {
           conn->state_ = TcpConnectionState::ESTABLISHED;
           conn->FreshActivity();
-          conn->Established();
+
+          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
+          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
+          // TODO: validate seq_num and ack_num
+          // seq_num should be remote ISN + 1
+          // ack_num should be local ISN + 1
+
+          conn->Established(ack_num, seq_num);
           // jump out state check
         } else if (conn->state_ == TcpConnectionState::ESTABLISHED) {
           // jump out state check
         } else {
           co_return TcpStackState::ERR_ARGUMENT;
         }
-
-        auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 8));
-        // FIXME
-        // conn->UpdateRecvAck(TcpPacketType::ACK, ackNum);
-
-        auto seqNum = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
 
         auto payload_size = total_bytes_used - payload_offset;
         if (payload_size) {
@@ -329,37 +319,47 @@ public:
           }
 
           typename std::remove_reference_t<decltype(*conn)>::PayloadWrapType
-              payloadPackets;
+              payload_packets;
 
           // TODO: process the case partial payload in header packet
-          auto pit = packets.begin();
-          if (pit != packets.end())
-            ++pit; // skip header
+          auto pit = std::begin(packets);
+          if (pit != std::end(packets))
+            std::advance(pit, 1); // skip header
+
+          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
+          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
+
+          conn->SetPacketSeqAck(get_packet_ref(*pit), seq_num, ack_num);
 
           if constexpr (kAcceptedPackets) {
-            for (; pit != packets.end(); ++pit) {
-              payloadPackets.push_back(*pit);
+            for (; pit != std::end(packets); std::advance(pit, 1)) {
+              payload_packets.push_back(*pit);
             }
           } else {
-            if (payload_size > (*pit)->GetUsedBytes())
+            packet = get_packet_ref(*pit);
+            if (payload_size > packet.GetUsedBytes())
               throw std::logic_error("We would lose payload here");
 
-            payloadPackets.swap(*pit);
+            if constexpr (requires { (*pit)->GetUsedBytes(); }) {
+              payload_packets.swap(*pit);
+            } else {
+              static_assert(false, "Unsupported packet container");
+            }
           }
 
-          // FIXME
-          // conn->UpdateRecvSeq(TcpPacketType::ACK, seqNum, payload_size);
-          conn->submitRxChann(std::move(payloadPackets));
+          conn->submitRxChann(std::move(payload_packets));
         } else {
-          // FIXME
-          // conn->UpdateRecvSeq(TcpPacketType::ACK, seqNum);
+          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
+          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
+
+          conn->SetPacketSeqAck(packet, seq_num, ack_num);
         }
 
         co_return TcpStackState::SUCCESS;
       } else {
         co_return TcpStackState::ERR_ARGUMENT;
       }
-    } else if (tcpFlags == 0x02) {
+    } else if (tcp_flags == 0x02) {
       // SYN
       auto conn = service->AddConnection(src_addr, src_port);
       if (conn->state_ != TcpConnectionState::LISTEN) {
@@ -369,40 +369,33 @@ public:
 
       conn->state_ = TcpConnectionState::SYN_RECEIVED;
 
-      auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(data + 4));
-      // TODO: set remote initial seq num
+      auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
+      conn->SetRemoteInitialSequenceNumber(seq_num);
 
       auto ack_num = seq_num + 1;
 
-      auto reply = hdr_pool_->allocate();
       // Generate ISN
       seq_num = this->GenerateInitialSequenceNumber(dst_addr, dst_port,
                                                     src_addr, src_port);
-      conn->AssemblePacketHeaders(TcpPacketType::SYN_ACK, reply, seq_num,
-                                  ack_num, 0);
 
-      auto ret = co_await tx_callback_(std::move(reply->GetConstBuf()));
-      if (ret >= reply->GetUsedBytes()) {
-        // FIXME
-#if 0
-        conn->UpdateSentSeq(TcpPacketType::SYN_ACK, seqNum, 1);
-#endif
+      try {
+        co_await conn->AsyncSendReply(TcpPacketType::SYN_ACK, seq_num, ack_num,
+                                      0);
         conn->FreshActivity();
-
-        co_return TcpStackState::SUCCESS;
       }
-      co_return TcpStackState::DROP;
+      catch (...) {
+        co_return TcpStackState::DROP;
+      }
+      co_return TcpStackState::SUCCESS;
     } else {
       co_return TcpStackState::DROP;
     }
   }
 };
 
-template <typename AddrType, typename NetworkIOObjectT,
-          typename TcpServiceFactory>
+template <typename AddrType, typename TcpServiceFactory>
 auto
-MakeAsyncTcpStack(std::shared_ptr<NetworkIOObjectT> net_io,
-                  shared_netbuf_pool_t hdr_pool, TcpServiceFactory)
+MakeAsyncTcpStack(TcpServiceFactory)
 {
 
   using ServiceTSharedPtrT
@@ -411,8 +404,7 @@ MakeAsyncTcpStack(std::shared_ptr<NetworkIOObjectT> net_io,
 
   using TcpServiceT = typename ServiceTSharedPtrT::element_type;
 
-  return AsyncUserspaceTcpStack<AddrType, TcpServiceT, NetworkIOObjectT>(
-      std::move(net_io), hdr_pool);
+  return AsyncUserspaceTcpStack<AddrType, TcpServiceT>();
 }
 
 } // namespace netio
