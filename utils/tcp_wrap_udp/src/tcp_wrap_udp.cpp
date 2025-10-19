@@ -63,8 +63,10 @@ private:
       auto pkt = co_await chan.async_receive(asio::use_awaitable);
       auto hdr = hdr_pool->allocate();
 
-      TcpConnection<AddrType, Policy>::FillPacketIpTcpHdr(TcpPacketType::ACK,
-                                                          *hdr, pkt);
+      std::forward_list<std::shared_ptr<NetPacket> > pkts = { hdr, pkt };
+
+      this->AssemblePacketHeaders(TcpPacketType::ACK, pkts);
+
       std::list<asio::const_buffer> bufs
           = { hdr->GetConstBuf(), pkt->GetConstBuf() };
 
@@ -100,9 +102,6 @@ public:
 #endif
   }
 
-  TcpUdpSession(TcpUdpSession &&) = default;
-  TcpUdpSession &operator=(TcpUdpSession &&) = default;
-
   ~TcpUdpSession()
   {
 #if 0
@@ -113,7 +112,7 @@ public:
   }
 
   virtual void
-  Established() override
+  Established(uint_fast32_t cur_seq_num, uint_fast32_t cur_ack_num) override
   {
     asio::ip::udp::endpoint dest(asio::ip::make_address_v6("::1"), udp_port_);
 
@@ -124,6 +123,19 @@ public:
     asio::co_spawn(ex_, udp_receiver(), asio::detached);
     asio::co_spawn(ex_, udp_forward_tcp(tcp_hdr_pool_, chan_tx_),
                    asio::detached);
+
+    (void)cur_seq_num;
+    (void)cur_ack_num;
+  }
+
+  virtual asio::awaitable<void>
+  AsyncSendReply(TcpPacketType packet_type, uint_fast32_t seq,
+                 uint_fast32_t ack, uint_fast32_t ttl) override
+  {
+    auto reply = tcp_hdr_pool_->allocate();
+    this->AssemblePacketHeaders(packet_type, reply, seq, ack, ttl);
+    co_await asio::async_write(*nout_, reply->GetConstBuf(),
+                               asio::use_awaitable);
   }
 
 private:
@@ -138,7 +150,9 @@ private:
 
   asio::ip::udp::socket udp_socket_;
 
+  // IP + TCP header pool
   std::shared_ptr<pool_t> tcp_hdr_pool_;
+
   std::shared_ptr<pool_t> tx_payload_pool_;
 };
 
@@ -167,6 +181,8 @@ NetIncoming(auto netio, auto &tcp_stack, auto hdr_pool, auto payload_pool)
         pkt->SetUsedBytes(pkt_size);
         auto state
             = co_await tcp_stack.ProcessIncomingPackets(std::move(chunks));
+        // TODO: report errors
+        (void)state;
         break;
       }
       /* read again */
@@ -276,7 +292,8 @@ main(int argc, char *argv[])
                                       uint_fast16_t local_port,
                                       const asio::ip::address_v4 &remote_addr,
                                       uint_fast16_t remote_port) {
-    return TcpUdpSession<asio::ip::address_v4, netdev::VirtualNetDev>(
+    return std::make_shared<
+        TcpUdpSession<asio::ip::address_v4, netdev::VirtualNetDev> >(
         local_addr, local_port, remote_addr, remote_port, exec, netdev,
         udp_port, hdr_pool, payload_pool);
   };
@@ -288,8 +305,7 @@ main(int argc, char *argv[])
         std::move(conn_factory), local_addr, local_port);
   };
 
-  auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(netdev, hdr_pool,
-                                                           serv_factory);
+  auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(serv_factory);
 
   auto peer_addr = netdev->GetIPv4PeerAddress();
   auto service = serv_factory(peer_addr, tcp_port);
