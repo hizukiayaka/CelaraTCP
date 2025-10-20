@@ -23,6 +23,7 @@ enum class FilterAction
   REJECT_SOURCE_IP,
   ACCEPT_TCP_ONLY,
   ACCEPT_4_TUPLE,
+  TCP_DPORT_FORWARD,
 };
 
 enum class FilterAttachPoint
@@ -97,6 +98,20 @@ public:
   RemovePeerNode([[maybe_unused]] const asio::ip::address &addr,
                  [[maybe_unused]] uint16_t src_port,
                  [[maybe_unused]] uint16_t dst_port)
+  {
+    return false;
+  }
+
+  virtual bool
+  AddWatchIpv4PortForward([[maybe_unused]] uint_fast16_t port,
+                          [[maybe_unused]] uint_fast32_t ifindex)
+  {
+    return false;
+  }
+
+  virtual bool
+  AddWatchIpv6PortForward([[maybe_unused]] uint_fast16_t port,
+                          [[maybe_unused]] uint_fast32_t ifindex)
   {
     return false;
   }
