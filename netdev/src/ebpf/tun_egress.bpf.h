@@ -3,6 +3,9 @@
  * SPDX-FileCopyrightText: Hsia-Jun(Randy) Li
  */
 
+#ifndef TUN_EGRESS_BPF_H_
+#define TUN_EGRESS_BPF_H_
+
 #include <linux/types.h>
 
 #define PER_SERVICE_MAX_CONNECTION 5
@@ -24,3 +27,5 @@ struct peer_value_v6 {
   __u8 src_ip[16];
   __u16 src_port;
 };
+
+#endif

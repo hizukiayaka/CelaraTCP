@@ -3,6 +3,7 @@ ebpf_sources = ['steering_multiq.bpf.c',
   'tun_egress.bpf.c',
   'l3_egress.bpf.c',
   'l2_ingress_fwd.bpf.c',
+  'l2_ingress_ring_l4.bpf.c',
   ]  # List of eBPF source files
 
 ebpf_obj_dir = join_paths(get_option('prefix'), get_option('libdir'),
