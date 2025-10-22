@@ -54,21 +54,6 @@ public:
 
 #if 0
 // Derived interface-specific classes
-class EthernetInterface : public PhysicalNetworkInterface
-{
-  // Standard Ethernet (eth0, en0, etc.)
-  bool
-  HasDirectGatewayMac() const override
-  {
-    return false;
-  } // Requires ARP lookup
-  bool
-  IsSuitableForAfPacket() const override
-  {
-    return true;
-  }
-};
-
 class PPPoEInterface : public PhysicalNetworkInterface
 {
   // PPPoE tunnel interface

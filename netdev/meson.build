@@ -11,28 +11,32 @@
 
 netdev_inc = [include_directories('inc')]
 
-netdev_sources = ['src/virtual_netdev.cpp']
+netdev_sources = []
+netdev_internal_dep = []
 
 if not is_variable('common_inc')
   common_inc = include_directories('../common/inc')
 endif
 
-libnl_dep = dependency('', required: false)
-libbpf_dep = dependency('', required: false)
 netdev_cpp_args = []
 
 if 'linux' in target_machine.kernel()
-  netdev_sources += ['src/tun_gnu_linux_impl.cpp',
-                    'src/ethernet_netdev_linux.cpp',
-                    'src/tc_egress_filter.cpp',
-                    'src/tc_egress_filter_lite.cpp',
-                    'src/tc_ingress_fwd.cpp',
+  netdev_sources += [
+                    'src/device/ethernet_netdev_linux.cpp',
+                    'src/device/tun_gnu_linux_impl.cpp',
+                    'src/tc/tc_egress_filter.cpp',
+                    'src/tc/tc_egress_filter_lite.cpp',
+                    'src/tc/tc_ingress_fwd.cpp',
                     ]
+
+  netdev_inc += include_directories('src/tc')
 
   libnl_dep = dependency('libnl-route-3.0')
   libbpf_dep = dependency('libbpf')
-  subdir('ebpf')
-  netdev_inc += include_directories('ebpf')
+  netdev_internal_dep += [ libnl_dep, libbpf_dep ]
+
+  subdir('src/ebpf')
+  netdev_inc += include_directories('src/ebpf')
   netdev_cpp_args += '-DEBPF_OBJECT_DIR="@0@"'.format(ebpf_obj_dir)
 else
   error('no support OS')
@@ -52,17 +56,17 @@ has_int128 = cpp.compiles('''
 # Define dependencies and flags based on int128 support
 if has_int128
   netdev_cpp_args += '-DHAVE_INT128=1'
-  abseil_dep = dependency('', required: false)
 else
   # Add abseil dependency when int128 is not available
   abseil_dep = dependency('absl', required: true)
+  netdev_internal_dep += [ abseil_dep ]
   netdev_cpp_args += '-DHAVE_INT128=0'
 endif
 
 netdev = library('netdev',
     netdev_sources,
     include_directories: [netdev_inc, common_inc],
-    dependencies: [libnl_dep, libbpf_dep, abseil_dep],
+    dependencies: netdev_internal_dep,
     cpp_args: netdev_cpp_args,
     sources: netdev_ebpf_skeletons  # Ensure skeletons are generated first
 )
