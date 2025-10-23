@@ -34,6 +34,17 @@ main(int argc, char *argv[])
   asio::io_context ioc;
   asio::co_spawn(ioc, run(), asio::detached);
 
+  auto e_net = netdev::EthernetNetdev("eth0");
+
+  auto dst_mac = e_net.GetGatewayMacAddress();
+  if (dst_mac) {
+    std::ranges::for_each(*dst_mac, [](auto i) {
+      std::cout << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<int>(i) << ":";
+    });
+    std::cout << std::endl;
+  }
+
   ioc.run();
 
   return 0;

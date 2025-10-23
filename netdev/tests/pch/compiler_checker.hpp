@@ -16,5 +16,6 @@
 
 #include "net_packet.hpp"
 
-#include "virtual_netdev.hpp"
+#include "ethernet_netdev.hpp"
 #include "net_filter_inf.hpp"
+#include "virtual_netdev.hpp"
