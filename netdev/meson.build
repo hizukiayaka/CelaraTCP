@@ -27,6 +27,7 @@ if 'linux' in target_machine.kernel()
                     'src/tc/tc_egress_filter.cpp',
                     'src/tc/tc_egress_filter_lite.cpp',
                     'src/tc/tc_ingress_fwd.cpp',
+                    'src/tc/tc_ingress_ringbuf.cpp',
                     ]
 
   netdev_inc += include_directories('src/tc')

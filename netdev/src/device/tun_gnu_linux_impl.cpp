@@ -89,9 +89,9 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::~TunGnuLinuxDetailImpl()
 {
   nl_socket_free(sk_);
 
-  xmit_filter_.release();
-  steering_filter_.release();
-  egress_filter_.release();
+  xmit_filter_.reset();
+  steering_filter_.reset();
+  egress_filter_.reset();
 }
 
 void

@@ -337,7 +337,7 @@ EthernetNetdev::EthernetNetdevLinux::AttachFilter(FilterAttachPoint point)
 
 EthernetNetdev::EthernetNetdevLinux::~EthernetNetdevLinux()
 {
-  ingress_filter_.release();
+  ingress_filter_.reset();
 
   if (link_)
     rtnl_link_put(link_);
