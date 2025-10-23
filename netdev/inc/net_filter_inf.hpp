@@ -6,9 +6,11 @@
 #ifndef NET_FILTER_INF_HPP_
 #define NET_FILTER_INF_HPP_
 
+#include <any>
 #include <cstdint>
 #include <list>
 
+#include <asio/any_io_executor.hpp>
 #include <asio/ip/address.hpp>
 
 namespace celaratcp {
@@ -24,6 +26,7 @@ enum class FilterAction
   ACCEPT_TCP_ONLY,
   ACCEPT_4_TUPLE,
   TCP_DPORT_FORWARD,
+  TCP_DPORT_CAPTURE,
 };
 
 enum class FilterAttachPoint
@@ -114,6 +117,20 @@ public:
                           [[maybe_unused]] uint_fast32_t ifindex)
   {
     return false;
+  }
+
+  virtual std::any
+  AddWatchIpv4PortRingbuf([[maybe_unused]] uint_fast16_t port,
+                          [[maybe_unused]] asio::any_io_executor ex)
+  {
+    return nullptr;
+  }
+
+  virtual std::any
+  AddWatchIpv6PortRingbuf([[maybe_unused]] uint_fast16_t port,
+                          [[maybe_unused]] asio::any_io_executor ex)
+  {
+    return nullptr;
   }
 };
 
