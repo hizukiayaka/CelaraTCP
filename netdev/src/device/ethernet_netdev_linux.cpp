@@ -14,7 +14,7 @@ extern "C"
 
 #define IN_LINKLOCAL(a) ((((a) & 0xffff0000) == 0xa9fe0000))
 
-#include "tc_ingress_fwd.hpp"
+#include "tc_ingress_ringbuf.hpp"
 #include "ethernet_netdev.hpp"
 
 namespace celaratcp {
@@ -317,12 +317,12 @@ EthernetNetdev::EthernetNetdevLinux::AttachFilter(FilterAttachPoint point)
 #error "EBPF_OBJECT_DIR must be defined by the build system"
 #endif
 
-  constexpr std::string_view ingress_obj_path = EBPF_OBJECT_DIR "/l2_ingress_fwd.o";
+  constexpr std::string_view ingress_obj_path = EBPF_OBJECT_DIR "/l2_ingress_ring_l4.o";
   switch (point) {
   case FilterAttachPoint::TC_INGRESS:
     try {
       auto ifindex = GetInterfaceIndex();
-      ingress_filter_ = std::make_unique<TcIngressFwd>(ingress_obj_path, ifindex);
+      ingress_filter_ = std::make_unique<TcIngressRingbuf>(ingress_obj_path, ifindex);
     }
     catch (...) {
       return nullptr;
