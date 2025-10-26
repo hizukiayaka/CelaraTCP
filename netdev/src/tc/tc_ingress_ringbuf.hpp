@@ -32,6 +32,7 @@ private:
   {
     uint_fast16_t port;
     int map_fd;
+    struct ring_buffer *rb;
   };
 
   std::list<PortMapFdPair> v4_tcp_maps_list_;

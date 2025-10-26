@@ -9,6 +9,8 @@ extern "C"
 #include <bpf/libbpf.h>
 }
 #include <algorithm>
+#include <iostream>
+#include <thread>
 
 #include "tc_ingress_ringbuf.hpp"
 
@@ -81,6 +83,25 @@ TcIngressRingbuf::TcIngressRingbuf(std::string_view ebpf_program_path,
 
 TcIngressRingbuf::~TcIngressRingbuf()
 {
+
+  for (const auto &p : v4_tcp_maps_list_) {
+    if (p.rb) {
+      ring_buffer__free(p.rb);
+    }
+    if (p.map_fd >= 0) {
+      close(p.map_fd);
+    }
+  }
+
+  for (const auto &p : v6_tcp_maps_list_) {
+    if (p.rb) {
+      ring_buffer__free(p.rb);
+    }
+    if (p.map_fd >= 0) {
+      close(p.map_fd);
+    }
+  }
+
   if (bpf_prog_) {
     int prog_fd = bpf_program__fd(bpf_prog_);
     if (prog_fd < 0) {
@@ -141,9 +162,32 @@ TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port)
   }
 
   LIBBPF_OPTS(ring_buffer_opts, r_opts);
-  auto rb = ring_buffer__new(mapfd, nullptr, nullptr, &r_opts);
+  auto test_cb = [](void *ctx, void *data, size_t size) -> int {
+    constexpr std::size_t sample_size = sizeof(struct capture_tcp_sample);
+    if (size < sample_size) {
+      return 0;
+    }
+    struct capture_tcp_sample *sample
+        = static_cast<struct capture_tcp_sample *>(data);
 
-  uint16_t port_v = static_cast<uint16_t>(port);
+    asio::ip::address_v4::bytes_type src_bytes;
+    std::memcpy(std::data(src_bytes), &sample->addr_h0, 4);
+    asio::ip::address_v4 src_addr(src_bytes);
+
+    std::cout << "Received TCPv4 packet from "
+              << std::hex << src_addr.to_uint() << ":"
+              << std::dec << ntohs(sample->sport) << " with seq "
+              << ntohl(sample->seq) << " ack "
+              << ntohl(sample->ack_seq) << " flags: "
+              << std::hex << static_cast<int>((sample->DORsFlags) >> 8)
+              << std::endl;
+    // Placeholder callback function
+    return 0;
+  };
+
+  auto rb = ring_buffer__new(mapfd, test_cb, nullptr, &r_opts);
+
+  uint16_t port_v = static_cast<uint16_t>(htons(port));
 
   auto ret
       = bpf_map_update_elem(v4_tcp_map_mapfd_, &port_v, &mapfd, BPF_NOEXIST);
@@ -154,9 +198,19 @@ TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port)
   PortMapFdPair pair = {
     .port = port,
     .map_fd = mapfd,
+    .rb = rb,
   };
 
   v4_tcp_maps_list_.push_back(pair);
+
+  std::thread([rb]() {
+    while (true) {
+      int err = ring_buffer__poll(rb, -1);
+      if (err == -EINTR) {
+        break;
+      }
+    }
+  }).detach();
 
   return mapfd;
 }
@@ -170,7 +224,8 @@ TcIngressRingbuf::AddWatchIpv6PortRingbuf(uint_fast16_t port)
 bool
 TcIngressRingbuf::RemoveWatchIpv4Port(uint16_t port)
 {
-  auto ret = bpf_map_delete_elem_flags(v4_tcp_map_mapfd_, &port, BPF_EXIST);
+  uint16_t port_v = static_cast<uint16_t>(htons(port));
+  auto ret = bpf_map_delete_elem_flags(v4_tcp_map_mapfd_, &port_v, BPF_EXIST);
   if (ret) {
     if (ret == -ENOENT)
       return true;
@@ -183,7 +238,8 @@ TcIngressRingbuf::RemoveWatchIpv4Port(uint16_t port)
 bool
 TcIngressRingbuf::RemoveWatchIpv6Port(uint16_t port)
 {
-  auto ret = bpf_map_delete_elem_flags(v6_tcp_map_mapfd_, &port, BPF_EXIST);
+  uint16_t port_v = static_cast<uint16_t>(htons(port));
+  auto ret = bpf_map_delete_elem_flags(v6_tcp_map_mapfd_, &port_v, BPF_EXIST);
   if (ret) {
     if (ret == -ENOENT)
       return true;
