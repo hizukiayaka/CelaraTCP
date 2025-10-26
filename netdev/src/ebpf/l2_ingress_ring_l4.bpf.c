@@ -20,7 +20,7 @@ char LICENSE[] SEC("license") = "GPL";
 
 struct inner_ring_buffer {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 1 << 12);
+	__uint(max_entries, 1 << 28);
 	__uint(key_size, 0);
 	__uint(value_size, 0);
 } inner_ring_buf_templ SEC(".maps");
@@ -74,9 +74,9 @@ static int commit_tcp_sample(struct __sk_buff *skb, void *ip_hdr,
 			void *data = (void *)(long)skb->data;
 			__u32 payload_offset = ((void *)tcp) - data;
 
-			__u8 flags = 0;
-			bpf_skb_load_bytes(skb, payload_offset + 13, &flags, 1);
-			info->tcp_flags = flags;
+			/* offset should start from tcp */
+			bpf_skb_load_bytes(skb, payload_offset + 12,
+					   &(info->DORsFlags), sizeof(__be16));
 
 			/* The actual offset we want */
 			payload_offset += sizeof(*tcp);
@@ -103,9 +103,10 @@ static int commit_tcp_sample(struct __sk_buff *skb, void *ip_hdr,
 				bpf_ringbuf_discard(info, 0);
 			}
 		}
+		/* Either we copy the data or no free space, we drop it */
+		return TC_ACT_SHOT;
 	}
-	/* Either we copy the data or no free space, we drop it */
-	return TC_ACT_SHOT;
+	return TC_ACT_OK;
 }
 
 SEC("tcx/ingress")

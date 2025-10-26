@@ -20,8 +20,11 @@ struct capture_tcp_sample {
 	__u16 data_size;
 	__be32 seq;
 	__be32 ack_seq;
-	__u8 tcp_flags;
-	/* payload starts after urg_ptr */
+	/**
+	 * copy from offset 12
+	 * DOffset | Rsrvd | Flags
+	 */
+	__be16 DORsFlags;
 	__u8 l4_payload[MAX_TCP_PAYLOAD_SIZE];
 } __attribute__((aligned(8)));
 
