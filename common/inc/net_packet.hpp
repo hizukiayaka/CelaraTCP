@@ -40,6 +40,7 @@ public:
   virtual asio::mutable_buffer GetMutableBuf() = 0;
 
   virtual std::span<unsigned char> GetData() = 0;
+  virtual std::span<const unsigned char> GetData() const = 0;
   virtual constexpr std::size_t GetMaximumSize() = 0;
 
   uint_fast16_t
@@ -126,6 +127,12 @@ public:
     return std::span<unsigned char>(data_.begin(), data_.end());
   };
 
+  std::span<const unsigned char>
+  GetData() const override
+  {
+    return std::span<const unsigned char>(data_.begin(), data_.end());
+  };
+
   std::array<unsigned char, kTotalSize> &
   GetStorageBuffer()
   {
@@ -195,6 +202,12 @@ public:
   GetData() override
   {
     return chunk_;
+  };
+
+  std::span<const unsigned char>
+  GetData() const override
+  {
+    return std::span<const unsigned char>(chunk_.begin(), chunk_.end());
   };
 
   virtual std::size_t
