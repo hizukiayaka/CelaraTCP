@@ -59,6 +59,9 @@ static int commit_tcp_sample(struct __sk_buff *skb, void *ip_hdr,
 			if (is_ipv4) {
 				struct iphdr *ip = ip_hdr;
 				info->addr_h0 = ip->saddr;
+				info->addr_h1 = 0;
+				info->addr_l1 = 0;
+				info->addr_l0 = 0;
 			} else {
 				struct ipv6hdr *ip6 = ip_hdr;
 				info->addr_h0 = ip6->saddr.in6_u.u6_addr32[0];
