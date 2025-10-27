@@ -140,21 +140,17 @@ using Ipv6UdpHdrPacket = NetPacketSW<kIpv6HdrSize, kUdpHdrSize>;
 
 class NetMemChunk : public NetPacket
 {
-private:
+protected:
   std::span<uint8_t> chunk_;
-  std::unique_ptr<uint8_t> meta_buf_;
 
 public:
   template <typename It>
-  NetMemChunk(It first, std::size_t count,
-              std::unique_ptr<uint8_t> meta = nullptr)
-      : chunk_(first, count), meta_buf_(std::move(meta))
+  NetMemChunk(It first, std::size_t count) : chunk_(first, count)
   {
   }
 
   template <typename It, typename End>
-  NetMemChunk(It first, End last, std::unique_ptr<uint8_t> meta = nullptr)
-      : chunk_(first, last), meta_buf_(std::move(meta))
+  NetMemChunk(It first, End last) : chunk_(first, last)
   {
   }
 
@@ -169,7 +165,7 @@ public:
   virtual asio::const_buffer
   GetConstBuf() override
   {
-    return asio::buffer(chunk_.data(), chunk_.size_bytes());
+    return asio::buffer(chunk_.data(), used_bytes);
   }
 
   virtual asio::mutable_buffer
@@ -208,4 +204,31 @@ public:
   };
 };
 
-}
+template <typename MetaT>
+class NetMemChunkMeta : public NetMemChunk
+{
+protected:
+  std::unique_ptr<MetaT> meta_;
+
+public:
+  template <typename It>
+  NetMemChunkMeta(It first, std::size_t count,
+                  std::unique_ptr<MetaT> meta = nullptr)
+      : NetMemChunk(first, count), meta_(std::move(meta))
+  {
+  }
+
+  template <typename It, typename End>
+  NetMemChunkMeta(It first, End last, std::unique_ptr<MetaT> meta = nullptr)
+      : NetMemChunk(first, last), meta_(std::move(meta))
+  {
+  }
+
+  MetaT *
+  GetMeta()
+  {
+    return meta_.get();
+  }
+};
+
+} // namespace celaratcp
