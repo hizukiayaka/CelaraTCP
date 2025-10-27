@@ -13,6 +13,7 @@
 #include <optional>
 
 #include "net_filter_inf.hpp"
+#include "bpf_tcp_ringbuf.hpp"
 
 namespace celaratcp {
 namespace netdev {
@@ -32,11 +33,16 @@ private:
   {
     uint_fast16_t port;
     int map_fd;
-    struct ring_buffer *rb;
+    std::shared_ptr<ebpf::EbpfTcpRingAllocator> r;
   };
 
   std::list<PortMapFdPair> v4_tcp_maps_list_;
   std::list<PortMapFdPair> v6_tcp_maps_list_;
+
+  static constexpr std::size_t kRingBufSize = (1 << 28);
+
+  static std::size_t GetPageSize();
+  static std::size_t GetAlignRingBufSize();
 
 public:
   TcIngressRingbuf(std::string_view ebpf_program_path, int ifindex);
@@ -46,10 +52,10 @@ public:
 
   bool EnableFilters(std::list<FilterAction> &types) override;
 
-  int AddWatchIpv4PortRingbuf(uint_fast16_t port) override;
+  std::any AddWatchIpv4PortRingbuf(uint_fast16_t port, asio::any_io_executor ex) override;
   bool RemoveWatchIpv4Port(uint16_t port) override;
 
-  int AddWatchIpv6PortRingbuf(uint_fast16_t port) override;
+  std::any AddWatchIpv6PortRingbuf(uint_fast16_t port, asio::any_io_executor ex) override;
   bool RemoveWatchIpv6Port(uint16_t port) override;
 };
 

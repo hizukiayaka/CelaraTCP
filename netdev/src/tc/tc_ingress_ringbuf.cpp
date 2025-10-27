@@ -9,13 +9,44 @@ extern "C"
 #include <bpf/libbpf.h>
 }
 #include <algorithm>
-#include <iostream>
-#include <thread>
 
 #include "tc_ingress_ringbuf.hpp"
 
 namespace celaratcp {
 namespace netdev {
+
+// static method
+std::size_t
+TcIngressRingbuf::GetPageSize()
+{
+  static const std::size_t page_size = sysconf(_SC_PAGE_SIZE);
+  return page_size;
+}
+
+std::size_t
+TcIngressRingbuf::GetAlignRingBufSize()
+{
+  static const std::size_t align_ringbuf_size = []() {
+    auto Get2Order = [](uint_fast64_t size) {
+      std::size_t order = 0;
+      while (size) {
+        size >>= 1;
+        order++;
+      }
+      return order;
+    };
+    auto page_2_order = Get2Order(GetPageSize());
+    auto size_2_order = Get2Order(kRingBufSize);
+
+    auto order = size_2_order - page_2_order;
+    std::size_t expect_size = GetPageSize() << order;
+    if (expect_size <= kRingBufSize)
+      return expect_size;
+    else
+      return expect_size >> 1;
+  }();
+  return align_ringbuf_size;
+}
 
 TcIngressRingbuf::TcIngressRingbuf(std::string_view ebpf_program_path,
                                    int ifindex)
@@ -85,18 +116,12 @@ TcIngressRingbuf::~TcIngressRingbuf()
 {
 
   for (const auto &p : v4_tcp_maps_list_) {
-    if (p.rb) {
-      ring_buffer__free(p.rb);
-    }
     if (p.map_fd >= 0) {
       close(p.map_fd);
     }
   }
 
   for (const auto &p : v6_tcp_maps_list_) {
-    if (p.rb) {
-      ring_buffer__free(p.rb);
-    }
     if (p.map_fd >= 0) {
       close(p.map_fd);
     }
@@ -142,8 +167,8 @@ TcIngressRingbuf::EnableFilters(std::list<FilterAction> &type)
   return false;
 }
 
-int
-TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port)
+std::any
+TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port, asio::any_io_executor ex)
 {
   for (const auto &p : v4_tcp_maps_list_) {
     if (p.port == port) {
@@ -155,70 +180,71 @@ TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port)
   LIBBPF_OPTS(bpf_map_create_opts, opts);
 
   int mapfd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, map_name.c_str(), 0, 0,
-                             sysconf(_SC_PAGE_SIZE) << 9, &opts);
+                             GetAlignRingBufSize(), &opts);
 
   if (mapfd < 0) {
-    return -1;
+    return nullptr;
   }
-
-  LIBBPF_OPTS(ring_buffer_opts, r_opts);
-  auto test_cb = [](void *ctx, void *data, size_t size) -> int {
-    constexpr std::size_t sample_size = sizeof(struct capture_tcp_sample);
-    if (size < sample_size) {
-      return 0;
-    }
-    struct capture_tcp_sample *sample
-        = static_cast<struct capture_tcp_sample *>(data);
-
-    asio::ip::address_v4::bytes_type src_bytes;
-    std::memcpy(std::data(src_bytes), &sample->addr_h0, 4);
-    asio::ip::address_v4 src_addr(src_bytes);
-
-    std::cout << "Received TCPv4 packet from "
-              << std::hex << src_addr.to_uint() << ":"
-              << std::dec << ntohs(sample->sport) << " with seq "
-              << ntohl(sample->seq) << " ack "
-              << ntohl(sample->ack_seq) << " flags: "
-              << std::hex << static_cast<int>((sample->DORsFlags) >> 8)
-              << std::endl;
-    // Placeholder callback function
-    return 0;
-  };
-
-  auto rb = ring_buffer__new(mapfd, test_cb, nullptr, &r_opts);
 
   uint16_t port_v = static_cast<uint16_t>(htons(port));
 
   auto ret
       = bpf_map_update_elem(v4_tcp_map_mapfd_, &port_v, &mapfd, BPF_NOEXIST);
   if (ret != 0) {
-    return -1;
+    return nullptr;
   }
+
+  auto r = std::make_shared<ebpf::EbpfTcpRingAllocator>(ex, mapfd, GetPageSize(), GetAlignRingBufSize());
 
   PortMapFdPair pair = {
     .port = port,
     .map_fd = mapfd,
-    .rb = rb,
+    .r = r,
   };
 
   v4_tcp_maps_list_.push_back(pair);
 
-  std::thread([rb]() {
-    while (true) {
-      int err = ring_buffer__poll(rb, -1);
-      if (err == -EINTR) {
-        break;
-      }
-    }
-  }).detach();
-
-  return mapfd;
+  return r;
 }
 
-int
-TcIngressRingbuf::AddWatchIpv6PortRingbuf(uint_fast16_t port)
+std::any
+TcIngressRingbuf::AddWatchIpv6PortRingbuf(uint_fast16_t port, asio::any_io_executor ex)
 {
-  return -1;
+  for (const auto &p : v6_tcp_maps_list_) {
+    if (p.port == port) {
+      return p.map_fd;
+    }
+  }
+
+  std::string map_name = "v6_" + std::to_string(port) + "_rbuf";
+  LIBBPF_OPTS(bpf_map_create_opts, opts);
+
+  int mapfd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, map_name.c_str(), 0, 0,
+                             GetAlignRingBufSize(), &opts);
+
+  if (mapfd < 0) {
+    return nullptr;
+  }
+
+  uint16_t port_v = static_cast<uint16_t>(htons(port));
+
+  auto ret
+      = bpf_map_update_elem(v6_tcp_map_mapfd_, &port_v, &mapfd, BPF_NOEXIST);
+  if (ret != 0) {
+    return nullptr;
+  }
+
+  auto r = std::make_shared<ebpf::EbpfTcpRingAllocator>(ex, mapfd, GetPageSize(), GetAlignRingBufSize());
+
+  PortMapFdPair pair = {
+    .port = port,
+    .map_fd = mapfd,
+    .r = r,
+  };
+
+  v6_tcp_maps_list_.push_back(pair);
+
+  return r;
 }
 
 bool
