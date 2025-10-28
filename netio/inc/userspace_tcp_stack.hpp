@@ -79,6 +79,51 @@ enum class CheckSumPolicy
   IP_TCP,
 };
 
+/**
+ * Generates an initial sequence number based on the 4-tuple
+ * (local address, local port, remote address, remote port).
+ *
+ * This approach avoids reliance on the wall clock and uses a hash-based
+ * method for determinism and uniqueness.
+ *
+ * @param local_addr The local IP address
+ * @param local_port The local port
+ * @param remote_addr The remote IP address
+ * @param remote_port The remote port
+ * @return A deterministic initial sequence number
+ */
+template <typename AddrType>
+static uint32_t
+GenerateInitialSequenceNumber(const AddrType &local_addr,
+                              uint_fast16_t local_port,
+                              const AddrType &remote_addr,
+                              uint_fast16_t remote_port)
+{
+  static std::array<uint32_t, 4> secret;
+  static std::once_flag init_flag;
+
+  // Initialize the secret key once
+  std::call_once(init_flag, []() {
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::uniform_int_distribution<uint32_t> dist;
+    for (auto &val : secret) {
+      val = dist(rng);
+    }
+  });
+
+  // Combine the 4-tuple with the secret key
+  uint32_t hash = secret[0];
+  hash ^= std::hash<AddrType>{}(local_addr) ^ secret[1];
+  hash ^= static_cast<uint32_t>(local_port) ^ secret[2];
+  hash ^= std::hash<AddrType>{}(remote_addr) ^ secret[3];
+  hash ^= static_cast<uint32_t>(remote_port);
+
+  // Finalize the hash
+  hash = (hash >> 16) ^ (hash & 0xFFFF);
+  return hash;
+}
+
 template <typename AddrType, CheckSumPolicy Policy = CheckSumPolicy::None>
 class TcpConnection
 {
@@ -677,7 +722,7 @@ public:
   }
 
   virtual std::shared_ptr<TcpConnectionT>
-  AddConnection(AddrType &remote_addr, uint_fast16_t remote_port)
+  AddConnection(const AddrType &remote_addr, uint_fast16_t remote_port)
   {
     auto it
         = std::find_if(connections_list_.cbegin(), connections_list_.cend(),
@@ -720,7 +765,7 @@ public:
   }
 
   virtual std::shared_ptr<TcpConnectionT>
-  GetConnection(AddrType &remoteAddr, uint_fast16_t remotePort)
+  GetConnection(const AddrType &remoteAddr, uint_fast16_t remotePort)
   {
     auto it = std::find_if(connections_list_.begin(), connections_list_.end(),
                            [&](const std::shared_ptr<TcpConnectionT> &conn) {
@@ -795,50 +840,6 @@ protected:
 
     constexpr auto ipHeaderLength = 40; // IPv6 header is always 40 bytes
     return { true, ipHeaderLength };
-  }
-
-  /**
-   * Generates an initial sequence number based on the 4-tuple
-   * (local address, local port, remote address, remote port).
-   *
-   * This approach avoids reliance on the wall clock and uses a hash-based
-   * method for determinism and uniqueness.
-   *
-   * @param local_addr The local IP address
-   * @param local_port The local port
-   * @param remote_addr The remote IP address
-   * @param remote_port The remote port
-   * @return A deterministic initial sequence number
-   */
-  static uint32_t
-  GenerateInitialSequenceNumber(const AddrType &local_addr,
-                                uint_fast16_t local_port,
-                                const AddrType &remote_addr,
-                                uint_fast16_t remote_port)
-  {
-    static std::array<uint32_t, 4> secret;
-    static std::once_flag init_flag;
-
-    // Initialize the secret key once
-    std::call_once(init_flag, []() {
-      std::random_device rd;
-      std::mt19937 rng(rd());
-      std::uniform_int_distribution<uint32_t> dist;
-      for (auto &val : secret) {
-        val = dist(rng);
-      }
-    });
-
-    // Combine the 4-tuple with the secret key
-    uint32_t hash = secret[0];
-    hash ^= std::hash<AddrType>{}(local_addr) ^ secret[1];
-    hash ^= static_cast<uint32_t>(local_port) ^ secret[2];
-    hash ^= std::hash<AddrType>{}(remote_addr) ^ secret[3];
-    hash ^= static_cast<uint32_t>(remote_port);
-
-    // Finalize the hash
-    hash = (hash >> 16) ^ (hash & 0xFFFF);
-    return hash;
   }
 
   UserspaceTcpStack() : mutex_{}, services_{} {}

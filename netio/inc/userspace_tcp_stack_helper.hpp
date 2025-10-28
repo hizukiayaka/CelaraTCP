@@ -250,6 +250,7 @@ public:
           conn->SetRemoteInitialSequenceNumber(seq_num);
 
           try {
+            // FIXME: check seq and ack number here
             co_await conn->AsyncSendReply(TcpPacketType::ACK, seq_num + 1,
                                           ack_num, 0);
             conn->state_ = TcpConnectionState::ESTABLISHED;
@@ -375,8 +376,8 @@ public:
       auto ack_num = seq_num + 1;
 
       // Generate ISN
-      seq_num = this->GenerateInitialSequenceNumber(dst_addr, dst_port,
-                                                    src_addr, src_port);
+      seq_num = GenerateInitialSequenceNumber<AddrType>(dst_addr, dst_port,
+                                                        src_addr, src_port);
 
       try {
         co_await conn->AsyncSendReply(TcpPacketType::SYN_ACK, seq_num, ack_num,
