@@ -12,7 +12,7 @@ class TcpUdpSession
     : public TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>, Policy>
 {
 private:
-  using pool_t = recycle::shared_pool<NetMemChunk>;
+  using pool_t = memmanager::SharedPoolAsync<NetMemChunk>;
 
   asio::awaitable<void>
   tcp_receiver()
@@ -29,7 +29,7 @@ private:
   udp_receiver()
   {
     for (;;) {
-      auto pkt = tx_payload_pool_->allocate();
+      auto pkt = co_await tx_payload_pool_->allocate();
       auto buf = pkt->GetMutableBuf();
       auto bytes
           = co_await udp_socket_.async_receive(buf, asio::use_awaitable);
@@ -46,7 +46,7 @@ private:
   {
     for (;;) {
       auto pkt = co_await chan.async_receive(asio::use_awaitable);
-      auto hdr = hdr_pool->allocate();
+      auto hdr = co_await hdr_pool->allocate();
 
       std::forward_list<std::shared_ptr<NetPacket> > pkts = { hdr, pkt };
 
@@ -117,7 +117,7 @@ public:
   AsyncSendReply(TcpPacketType packet_type, uint_fast32_t seq,
                  uint_fast32_t ack, uint_fast32_t ttl) override
   {
-    auto reply = tcp_hdr_pool_->allocate();
+    auto reply = co_await tcp_hdr_pool_->allocate();
     this->AssemblePacketHeaders(packet_type, reply, seq, ack, ttl);
     co_await asio::async_write(*nout_, reply->GetConstBuf(),
                                asio::use_awaitable);
@@ -145,6 +145,8 @@ template <typename AddrType, typename TcpConnFactory>
 class TcpServiceRingBuf : public ebpf::TcpService<AddrType, TcpConnFactory>
 {
 private:
+  asio::any_io_executor exec_;
+
   static asio::awaitable<void>
   ProcessIncoming(auto service, auto r)
   {
@@ -164,7 +166,8 @@ public:
                     uint_fast16_t local_port, netdev::IPacketFilter *filter,
                     asio::any_io_executor &exec)
       : ebpf::TcpService<AddrType, TcpConnFactory>(
-            std::move(conn_factory), local_addr, local_port, filter, exec)
+            std::move(conn_factory), local_addr, local_port, filter),
+        exec_(std::move(exec))
   {
   }
 
@@ -289,15 +292,15 @@ main(int argc, char *argv[])
 
   constexpr auto kHdrSize = kIpv4HdrSize + kTcpHdrMinimalSize;
   memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kHdrSize);
-  std::shared_ptr<recycle::shared_pool<NetMemChunk> > hdr_pool
-      = std::make_shared<recycle::shared_pool<NetMemChunk> >(
+  std::shared_ptr<memmanager::SharedPoolAsync<NetMemChunk> > hdr_pool
+      = std::make_shared<memmanager::SharedPoolAsync<NetMemChunk> >(exec,
           [&hdr_alloc]() { return hdr_alloc.Allocation(); });
   hdr_pool->reserve(40);
 
   memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc(kRegularMtu
-                                                             - kHdrSize);
-  std::shared_ptr<recycle::shared_pool<NetMemChunk> > payload_pool
-      = std::make_shared<recycle::shared_pool<NetMemChunk> >(
+                                                            - kHdrSize);
+  std::shared_ptr<memmanager::SharedPoolAsync<NetMemChunk> > payload_pool
+      = std::make_shared<memmanager::SharedPoolAsync<NetMemChunk> >(exec,
           [&payload_alloc]() { return payload_alloc.Allocation(); });
   payload_pool->reserve(40);
 

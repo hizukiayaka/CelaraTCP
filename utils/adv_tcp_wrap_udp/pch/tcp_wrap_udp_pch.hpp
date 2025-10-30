@@ -15,7 +15,10 @@
 #include <thread>
 
 #include "net_packet_allocator.hpp"
+#include "shared_pool_async.hpp"
+
 #include "userspace_tcp_stack_helper.hpp"
+
 #include "virtual_netdev.hpp"
 #include "ethernet_netdev.hpp"
 #include "ebpf_tcp_service.hpp"
