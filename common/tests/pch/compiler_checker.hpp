@@ -9,5 +9,6 @@
 #include <list>
 #include <optional>
 
+#include "recycle/shared_pool.hpp"
 #include "net_packet.hpp"
 #include "net_packet_allocator.hpp"

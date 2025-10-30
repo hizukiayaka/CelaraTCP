@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "net_packet.hpp"
-#include <recycle/shared_pool.hpp>
 
 namespace celaratcp {
 namespace memmanager {
