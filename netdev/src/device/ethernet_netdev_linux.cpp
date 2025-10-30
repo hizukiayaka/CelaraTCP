@@ -14,8 +14,8 @@ extern "C"
 
 #define IN_LINKLOCAL(a) ((((a) & 0xffff0000) == 0xa9fe0000))
 
-#include "tc_ingress_ringbuf.hpp"
 #include "ethernet_netdev.hpp"
+#include "tc_ingress_ringbuf.hpp"
 
 namespace celaratcp {
 namespace netdev {
@@ -26,19 +26,26 @@ private:
   struct nl_sock *sk_;
   struct rtnl_link *link_;
 
+  int ifindex_;
+
   std::unique_ptr<IPacketFilter> ingress_filter_;
+
 public:
   EthernetNetdevLinux(std::string_view inf_name);
+  EthernetNetdevLinux(int ifindex);
+
   ~EthernetNetdevLinux();
 
   std::string GetInterfaceName() const;
 
   int GetInterfaceIndex() const;
 
+  int GetMtu() const;
+
   std::optional<asio::ip::address_v4> GetIPv4Address() const;
 
-  std::optional<asio::ip::address_v6> GetIPv6Address() const;
-
+  std::optional<asio::ip::address_v6>
+  GetIPv6Address(ipv6::AddressScope scope) const;
   std::array<uint8_t, ETH_ALEN> GetMacAddress() const;
 
   std::optional<std::array<uint8_t, ETH_ALEN> > GetGatewayMacAddress() const;
@@ -55,9 +62,32 @@ public:
     return true;
   }
 
+  std::error_code SetMtu(const uint_fast16_t mtu);
+
+  bool SetLocalIPv4Address(const asio::ip::address_v4 &addr,
+                           uint_fast8_t prefix);
+  bool SetLocalIPv6Address(const asio::ip::address_v6 &addr,
+                           uint_fast8_t prefix);
+
   std::list<FilterAttachPoint> GetSupportAttachPoint() const override;
   IPacketFilter *AttachFilter(FilterAttachPoint point) override;
 };
+
+EthernetNetdev::EthernetNetdevLinux::EthernetNetdevLinux(int ifindex)
+    : sk_(nullptr), link_(nullptr), ifindex_(ifindex), ingress_filter_(nullptr)
+{
+  sk_ = nl_socket_alloc();
+
+  auto ret = nl_connect(sk_, NETLINK_ROUTE);
+  if (ret) {
+    nl_socket_free(sk_);
+    throw std::runtime_error("failed to connect to netlink");
+  }
+
+  ret = rtnl_link_get_kernel(sk_, ifindex, nullptr, &link_);
+  if (ret)
+    throw std::logic_error("can't bind request interface");
+}
 
 EthernetNetdev::EthernetNetdevLinux::EthernetNetdevLinux(
     std::string_view inf_name)
@@ -74,6 +104,8 @@ EthernetNetdev::EthernetNetdevLinux::EthernetNetdevLinux(
   ret = rtnl_link_get_kernel(sk_, -1, std::data(inf_name), &link_);
   if (ret)
     throw std::logic_error("can't bind request interface");
+
+  ifindex_ = rtnl_link_get_ifindex(link_);
 }
 
 std::string
@@ -89,7 +121,13 @@ EthernetNetdev::EthernetNetdevLinux::GetInterfaceName() const
 int
 EthernetNetdev::EthernetNetdevLinux::GetInterfaceIndex() const
 {
-  return rtnl_link_get_ifindex(link_);
+  return ifindex_;
+}
+
+int
+EthernetNetdev::EthernetNetdevLinux::GetMtu() const
+{
+  return rtnl_link_get_mtu(link_);
 }
 
 std::array<uint8_t, ETH_ALEN>
@@ -120,7 +158,7 @@ EthernetNetdev::EthernetNetdevLinux::GetIPv4Address() const
 
   // Find addresses for our interface
   struct rtnl_addr *filter = rtnl_addr_alloc();
-  rtnl_addr_set_ifindex(filter, rtnl_link_get_ifindex(link_));
+  rtnl_addr_set_ifindex(filter, ifindex_);
 
   // Filter for IPv4 addresses
   for (struct nl_object *obj = nl_cache_get_first(addr_cache); obj != nullptr;
@@ -130,7 +168,7 @@ EthernetNetdev::EthernetNetdevLinux::GetIPv4Address() const
     struct rtnl_addr *addr = (struct rtnl_addr *)obj;
 
     // Skip if not our interface
-    if (rtnl_addr_get_ifindex(addr) != rtnl_link_get_ifindex(link_)) {
+    if (rtnl_addr_get_ifindex(addr) != ifindex_) {
       continue;
     }
 
@@ -162,7 +200,8 @@ EthernetNetdev::EthernetNetdevLinux::GetIPv4Address() const
 }
 
 std::optional<asio::ip::address_v6>
-EthernetNetdev::EthernetNetdevLinux::GetIPv6Address() const
+EthernetNetdev::EthernetNetdevLinux::GetIPv6Address(
+    ipv6::AddressScope scope) const
 {
   struct nl_cache *addr_cache = nullptr;
   std::optional<asio::ip::address_v6> result;
@@ -174,7 +213,7 @@ EthernetNetdev::EthernetNetdevLinux::GetIPv6Address() const
 
   // Find addresses for our interface
   struct rtnl_addr *filter = rtnl_addr_alloc();
-  rtnl_addr_set_ifindex(filter, rtnl_link_get_ifindex(link_));
+  rtnl_addr_set_ifindex(filter, ifindex_);
 
   // Filter for IPv6 addresses
   for (struct nl_object *obj = nl_cache_get_first(addr_cache); obj != nullptr;
@@ -184,7 +223,7 @@ EthernetNetdev::EthernetNetdevLinux::GetIPv6Address() const
     struct rtnl_addr *addr = (struct rtnl_addr *)obj;
 
     // Skip if not our interface
-    if (rtnl_addr_get_ifindex(addr) != rtnl_link_get_ifindex(link_)) {
+    if (rtnl_addr_get_ifindex(addr) != ifindex_) {
       continue;
     }
 
@@ -194,20 +233,43 @@ EthernetNetdev::EthernetNetdevLinux::GetIPv6Address() const
       continue;
     }
 
-    // Skip link-local addresses (fe80::/10)
     const uint8_t *addr_bytes
         = (const uint8_t *)nl_addr_get_binary_addr(local);
-    if (addr_bytes[0] == 0xfe && (addr_bytes[1] & 0xc0) == 0x80) {
+    switch (scope) {
+    case ipv6::AddressScope::LinkLocal:
+      if (addr_bytes[0] == 0xfe && (addr_bytes[1] & 0xc0) == 0x80) {
+        // Link-local address
+        asio::ip::address_v6::bytes_type bytes;
+        std::memcpy(bytes.data(), addr_bytes,
+                    asio::ip::address_v6::bytes_type().size());
+        result = asio::ip::address_v6(bytes);
+        break;
+      }
+      continue;
+    case ipv6::AddressScope::UniqueLocal:
+      if (addr_bytes[0] == 0xfc || addr_bytes[0] == 0xfd) {
+        // Unique local address
+        asio::ip::address_v6::bytes_type bytes;
+        std::memcpy(bytes.data(), addr_bytes,
+                    asio::ip::address_v6::bytes_type().size());
+        result = asio::ip::address_v6(bytes);
+        break;
+      }
+      continue;
+    case ipv6::AddressScope::GlobalUnicast:
+      // Not link-local
+      if (!(addr_bytes[0] == 0xfe && (addr_bytes[1] & 0xc0) == 0x80)
+          && // Not ULA
+          !(addr_bytes[0] == 0xfc || addr_bytes[0] == 0xfd))
+      {
+        asio::ip::address_v6::bytes_type bytes;
+        std::memcpy(bytes.data(), addr_bytes,
+                    asio::ip::address_v6::bytes_type().size());
+        result = asio::ip::address_v6(bytes);
+        break;
+      }
       continue;
     }
-
-    // Convert to asio address
-    asio::ip::address_v6::bytes_type bytes;
-    std::memcpy(bytes.data(), nl_addr_get_binary_addr(local),
-                std::min(bytes.size(), (size_t)nl_addr_get_len(local)));
-
-    result = asio::ip::address_v6(bytes);
-    break;
   }
 
   rtnl_addr_put(filter);
@@ -251,7 +313,7 @@ EthernetNetdev::EthernetNetdevLinux::GetGatewayMacAddress() const
     int nexthops = rtnl_route_get_nnexthops(route);
     for (int i = 0; i < nexthops; i++) {
       struct rtnl_nexthop *nh = rtnl_route_nexthop_n(route, i);
-      if (rtnl_route_nh_get_ifindex(nh) == rtnl_link_get_ifindex(link_)) {
+      if (rtnl_route_nh_get_ifindex(nh) == ifindex_) {
         gw_addr = rtnl_route_nh_get_gateway(nh);
         if (gw_addr) {
           nl_addr_get(gw_addr); // Increase refcount
@@ -276,7 +338,7 @@ found_gateway:
     struct rtnl_neigh *neigh = (struct rtnl_neigh *)obj;
 
     // Check if neighbor for our interface
-    if (rtnl_neigh_get_ifindex(neigh) != rtnl_link_get_ifindex(link_)) {
+    if (rtnl_neigh_get_ifindex(neigh) != ifindex_) {
       continue;
     }
 
@@ -304,10 +366,83 @@ found_gateway:
   return result;
 }
 
+std::error_code
+EthernetNetdev::EthernetNetdevLinux::SetMtu(const uint_fast16_t mtu)
+{
+  struct rtnl_link *new_link = rtnl_link_alloc();
+  if (!new_link) {
+    return std::make_error_code(std::errc::not_enough_memory);
+  }
+
+  rtnl_link_set_ifindex(new_link, ifindex_);
+  rtnl_link_set_mtu(new_link, mtu);
+
+  int ret = rtnl_link_change(sk_, new_link, link_, 0);
+  rtnl_link_put(new_link);
+
+  if (ret < 0) {
+    return std::error_code(-ret, std::generic_category());
+  }
+
+  return {};
+}
+
+bool
+EthernetNetdev::EthernetNetdevLinux::SetLocalIPv4Address(
+    const asio::ip::address_v4 &addr, uint_fast8_t prefix)
+{
+  auto addr_d = addr.to_bytes();
+  struct nl_addr *local_addr
+      = nl_addr_build(AF_INET, std::data(addr_d), std::size(addr_d));
+
+  struct rtnl_addr *rt_addr = rtnl_addr_alloc();
+
+  rtnl_addr_set_ifindex(rt_addr, ifindex_);
+  rtnl_addr_set_local(rt_addr, local_addr);
+  rtnl_addr_set_prefixlen(rt_addr, prefix);
+
+  if (rtnl_addr_add(sk_, rt_addr, 0)) {
+    nl_addr_put(local_addr);
+    rtnl_addr_put(rt_addr);
+    return false;
+  }
+
+  nl_addr_put(local_addr);
+  rtnl_addr_put(rt_addr);
+
+  return true;
+}
+
+bool
+EthernetNetdev::EthernetNetdevLinux::SetLocalIPv6Address(
+    const asio::ip::address_v6 &addr, uint_fast8_t prefix)
+{
+  auto addr_d = addr.to_bytes();
+  struct nl_addr *local_addr
+      = nl_addr_build(AF_INET6, std::data(addr_d), std::size(addr_d));
+
+  struct rtnl_addr *rt_addr = rtnl_addr_alloc();
+
+  rtnl_addr_set_ifindex(rt_addr, ifindex_);
+  rtnl_addr_set_local(rt_addr, local_addr);
+  rtnl_addr_set_prefixlen(rt_addr, prefix);
+
+  if (rtnl_addr_add(sk_, rt_addr, 0)) {
+    nl_addr_put(local_addr);
+    rtnl_addr_put(rt_addr);
+    return false;
+  }
+
+  nl_addr_put(local_addr);
+  rtnl_addr_put(rt_addr);
+
+  return true;
+}
+
 std::list<FilterAttachPoint>
 EthernetNetdev::EthernetNetdevLinux::GetSupportAttachPoint() const
 {
-  return { FilterAttachPoint::TC_INGRESS};
+  return { FilterAttachPoint::TC_INGRESS };
 }
 
 IPacketFilter *
@@ -317,12 +452,14 @@ EthernetNetdev::EthernetNetdevLinux::AttachFilter(FilterAttachPoint point)
 #error "EBPF_OBJECT_DIR must be defined by the build system"
 #endif
 
-  constexpr std::string_view ingress_obj_path = EBPF_OBJECT_DIR "/l2_ingress_ring_l4.o";
+  constexpr std::string_view ingress_obj_path
+      = EBPF_OBJECT_DIR "/l2_ingress_ring_l4.o";
   switch (point) {
   case FilterAttachPoint::TC_INGRESS:
     try {
       auto ifindex = GetInterfaceIndex();
-      ingress_filter_ = std::make_unique<TcIngressRingbuf>(ingress_obj_path, ifindex);
+      ingress_filter_
+          = std::make_unique<TcIngressRingbuf>(ingress_obj_path, ifindex);
     }
     catch (...) {
       return nullptr;
@@ -350,6 +487,11 @@ EthernetNetdev::EthernetNetdev(std::string_view inf_name)
 {
 }
 
+EthernetNetdev::EthernetNetdev(int ifindex)
+    : pImpl_(std::make_unique<EthernetNetdev::EthernetNetdevLinux>(ifindex))
+{
+}
+
 std::string
 EthernetNetdev::GetInterfaceName() const
 {
@@ -362,6 +504,12 @@ EthernetNetdev::GetInterfaceIndex() const
   return pImpl_->GetInterfaceIndex();
 }
 
+int
+EthernetNetdev::GetMtu() const
+{
+  return pImpl_->GetMtu();
+}
+
 std::optional<asio::ip::address_v4>
 EthernetNetdev::GetIPv4Address() const
 {
@@ -369,9 +517,9 @@ EthernetNetdev::GetIPv4Address() const
 }
 
 std::optional<asio::ip::address_v6>
-EthernetNetdev::GetIPv6Address() const
+EthernetNetdev::GetIPv6Address(ipv6::AddressScope scope) const
 {
-  return pImpl_->GetIPv6Address();
+  return pImpl_->GetIPv6Address(scope);
 }
 
 std::array<uint8_t, ETH_ALEN>
@@ -386,12 +534,41 @@ EthernetNetdev::GetGatewayMacAddress() const
   return pImpl_->GetGatewayMacAddress();
 }
 
-std::list<FilterAttachPoint> EthernetNetdev::GetSupportAttachPoint() const
+std::error_code
+EthernetNetdev::SetMtu(uint_fast16_t mtu)
+{
+  return pImpl_->SetMtu(mtu);
+}
+
+bool
+EthernetNetdev::SetLocalAddress(
+    const std::variant<asio::ip::network_v4, asio::ip::network_v6> &network)
+{
+  return std::visit(
+      [this](auto &&net) {
+        using T = std::decay_t<decltype(net)>;
+        if constexpr (std::is_same_v<T, asio::ip::network_v4>) {
+          // Set IPv4 address
+          return pImpl_->SetLocalIPv4Address(net.address(),
+                                             net.prefix_length());
+        } else if constexpr (std::is_same_v<T, asio::ip::network_v6>) {
+          // Set IPv6 address
+          return pImpl_->SetLocalIPv6Address(net.address(),
+                                             net.prefix_length());
+        }
+        return false;
+      },
+      network);
+}
+
+std::list<FilterAttachPoint>
+EthernetNetdev::GetSupportAttachPoint() const
 {
   return pImpl_->GetSupportAttachPoint();
 }
 
-IPacketFilter *EthernetNetdev::AttachFilter(FilterAttachPoint point)
+IPacketFilter *
+EthernetNetdev::AttachFilter(FilterAttachPoint point)
 {
   return pImpl_->AttachFilter(point);
 }

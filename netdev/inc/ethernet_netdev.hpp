@@ -22,6 +22,8 @@ private:
       pImpl_;
 #endif
 public:
+  EthernetNetdev(int ifindex);
+
   EthernetNetdev(std::string_view inf_name);
   ~EthernetNetdev() override;
 
@@ -29,9 +31,12 @@ public:
 
   int GetInterfaceIndex() const override;
 
+  int GetMtu() const override;
+
   std::optional<asio::ip::address_v4> GetIPv4Address() const override;
 
-  std::optional<asio::ip::address_v6> GetIPv6Address() const override;
+  std::optional<asio::ip::address_v6>
+  GetIPv6Address(ipv6::AddressScope scope) const override;
 
   std::array<uint8_t, ETH_ALEN> GetMacAddress() const override;
 
@@ -49,6 +54,12 @@ public:
   {
     return true;
   }
+
+  std::error_code SetMtu(uint_fast16_t mtu) override;
+
+  bool SetLocalAddress(
+      const std::variant<asio::ip::network_v4, asio::ip::network_v6> &network)
+      override;
 
   std::list<FilterAttachPoint> GetSupportAttachPoint() const override;
   IPacketFilter *AttachFilter(FilterAttachPoint point) override;
