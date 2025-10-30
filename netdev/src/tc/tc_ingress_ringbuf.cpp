@@ -135,9 +135,7 @@ TcIngressRingbuf::~TcIngressRingbuf()
       LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex_,
                   .attach_point = BPF_TC_INGRESS, );
 
-      LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = prog_fd,
-                  .flags = BPF_TC_F_REPLACE, .handle = 1, .priority = 1, );
-
+      LIBBPF_OPTS(bpf_tc_opts, opts, .handle = 1, .priority = 1, );
       bpf_tc_detach(&hook, &opts);
       bpf_tc_hook_destroy(&hook);
     }
