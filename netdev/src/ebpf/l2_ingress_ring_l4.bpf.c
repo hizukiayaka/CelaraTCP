@@ -91,7 +91,7 @@ static int commit_tcp_sample(struct __sk_buff *skb, void *ip_hdr,
 				payload_size = MAX_TCP_PAYLOAD_SIZE;
 			} else if (payload_size == 0) {
 				info->data_size = 0;
-				bpf_ringbuf_submit(info, 0);
+				bpf_ringbuf_submit(info, BPF_RB_FORCE_WAKEUP);
 				/* We submit the TCP info to user, drop it from stack */
 				return TC_ACT_SHOT;
 			}
@@ -101,9 +101,9 @@ static int commit_tcp_sample(struct __sk_buff *skb, void *ip_hdr,
 			if (bpf_skb_load_bytes
 			    (skb, payload_offset, &(info->l4_payload),
 			     payload_size) == 0) {
-				bpf_ringbuf_submit(info, 0);
+				bpf_ringbuf_submit(info, BPF_RB_FORCE_WAKEUP);
 			} else {
-				bpf_ringbuf_discard(info, 0);
+				bpf_ringbuf_discard(info, BPF_RB_FORCE_WAKEUP);
 			}
 		}
 		/* Either we copy the data or no free space, we drop it */
