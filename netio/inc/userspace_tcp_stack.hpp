@@ -19,6 +19,7 @@ extern "C"
 #include <forward_list>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <ranges>
@@ -572,6 +573,7 @@ public:
 
       CompleteTcpCheckSum(tcp, ip_payload_size, seq, ack, payload_sum);
     }
+    packet.SetUsedBytes(kIpTcpHdrMinimalSize + payload_size);
   }
 
   template <NetPacketWrapper PacketContainer>
