@@ -61,8 +61,8 @@ public:
     return derived().write_some_impl(b, std::forward<Token>(t));
   }
 
-  virtual asio::ip::address_v4 GetIPv4PeerAddress() const = 0;
-  virtual asio::ip::address_v6 GetIPv6PeerAddress() const = 0;
+  virtual asio::ip::address_v4 GetPeerIPv4Address() const = 0;
+  virtual asio::ip::address_v6 GetPeerIPv6Address() const = 0;
 
   virtual bool Up() = 0;
   virtual bool Down() = 0;

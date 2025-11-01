@@ -22,6 +22,7 @@ netdev_cpp_args = []
 
 if 'linux' in target_machine.kernel()
   netdev_sources += [
+                    'src/device/netdev_core_linux.cpp',
                     'src/device/ethernet_netdev_linux.cpp',
                     'src/device/tun_gnu_linux_impl.cpp',
                     'src/tc/tc_egress_filter.cpp',

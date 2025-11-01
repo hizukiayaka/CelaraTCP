@@ -10,6 +10,7 @@
 #include <asio/posix/stream_descriptor.hpp>
 #include <asio/strand.hpp>
 #include <experimental/propagate_const>
+#include <string_view>
 
 #include "net_filter_inf.hpp"
 #include "virtual_netdev_base.hpp"
@@ -32,14 +33,18 @@ private:
   bool is_client_;
 
 private:
-  TunGnuLinuxImpl(asio::any_io_executor &ex, const std::string &intl_name);
+  TunGnuLinuxImpl(asio::any_io_executor &ex, const std::string_view intl_name);
 
 public:
   using executor_type = asio::posix::stream_descriptor::executor_type;
 
   ~TunGnuLinuxImpl() override;
-  TunGnuLinuxImpl(asio::any_io_executor &ex, const std::string &intl_name,
+
+  TunGnuLinuxImpl(asio::any_io_executor &ex, const std::string_view intl_name,
                   const asio::ip::address_v4 &addr);
+
+  TunGnuLinuxImpl(asio::any_io_executor &ex, const std::string_view intl_name,
+                  const asio::ip::address_v6 &addr);
 
   template <typename Bufs, typename Token>
   auto
@@ -56,8 +61,8 @@ public:
         b, asio::bind_executor(strand_write_, std::forward<Token>(t)));
   }
 
-  asio::ip::address_v4 GetIPv4PeerAddress() const override;
-  asio::ip::address_v6 GetIPv6PeerAddress() const override;
+  asio::ip::address_v4 GetPeerIPv4Address() const override;
+  asio::ip::address_v6 GetPeerIPv6Address() const override;
 
   bool Up() override;
   bool Down() override;

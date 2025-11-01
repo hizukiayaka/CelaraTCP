@@ -21,10 +21,11 @@ private:
   std::experimental::propagate_const<std::unique_ptr<EthernetNetdevLinux> >
       pImpl_;
 #endif
+
 public:
   EthernetNetdev(int ifindex);
-
   EthernetNetdev(std::string_view inf_name);
+
   ~EthernetNetdev() override;
 
   std::string GetInterfaceName() const override;
