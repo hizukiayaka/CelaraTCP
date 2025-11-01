@@ -121,6 +121,7 @@ public:
     this->AssemblePacketHeaders(packet_type, reply, seq, ack, ttl);
     co_await asio::async_write(*nout_, reply->GetConstBuf(),
                                asio::use_awaitable);
+    co_return;
   }
 
 private:
@@ -258,6 +259,7 @@ main(int argc, char *argv[])
 
   auto v_netdev = std::make_shared<netdev::VirtualNetDev>(
       exec, virt_interface_name, local_addr);
+
   auto attach_list = v_netdev->GetSupportAttachPoint();
   netdev::IPacketFilter *filter
       = v_netdev->AttachFilter(netdev::FilterAttachPoint::TC_EGRESS);
@@ -333,6 +335,11 @@ main(int argc, char *argv[])
   }
 
   v_netdev->Up();
+
+  asio::signal_set signals(ioc, SIGINT, SIGTERM);
+  signals.async_wait([&](std::error_code /*ec*/, int /*signal*/) {
+    ioc.stop(); // Stop the io_context
+  });
 
   std::thread t1([&ioc]() { ioc.run(); });
   std::thread t2([&ioc]() { ioc.run(); });
