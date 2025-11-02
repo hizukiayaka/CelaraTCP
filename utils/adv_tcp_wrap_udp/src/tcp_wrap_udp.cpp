@@ -251,7 +251,7 @@ main(int argc, char *argv[])
   }
 
   std::list<netdev::FilterAction> apply_filters
-      = { netdev::FilterAction::TCP_DPORT_FORWARD };
+      = { netdev::FilterAction::TCP_DPORT_CAPTURE };
   if (!fwd_filter->EnableFilters(apply_filters)) {
     std::cerr << "Error: Failed to apply the packet forward filter.\n";
     return 1;

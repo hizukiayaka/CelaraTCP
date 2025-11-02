@@ -292,7 +292,7 @@ main(int argc, char *argv[])
 
   auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(serv_factory);
 
-  auto peer_addr = netdev->GetIPv4PeerAddress();
+  auto peer_addr = netdev->GetPeerIPv4Address();
   auto service = serv_factory(peer_addr, tcp_port);
   tcp_stack.AddService(service);
 
@@ -301,6 +301,11 @@ main(int argc, char *argv[])
 
   // filter->AddWatchIpv4Port(tcp_port);
   netdev->Up();
+
+  asio::signal_set signals(ioc, SIGINT, SIGTERM);
+  signals.async_wait([&](std::error_code /*ec*/, int /*signal*/) {
+    ioc.stop(); // Stop the io_context
+  });
 
   std::thread t1([&ioc]() { ioc.run(); });
   std::thread t2([&ioc]() { ioc.run(); });
