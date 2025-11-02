@@ -6,26 +6,18 @@
 #ifndef TC_EGRESS_FILTER_HPP_
 #define TC_EGRESS_FILTER_HPP_
 
-#include <bpf/bpf.h>
-#include <cstdint>
-#include <experimental/propagate_const>
 #include <list>
 #include <optional>
 
 #include "net_filter_inf.hpp"
+#include "tc_egress_filter_lite.hpp"
 
 namespace celaratcp {
 namespace netdev {
 
-class TcEgressFilter : public IPacketFilter
+class TcEgressFilter : public TcEgressFilterLite
 {
 private:
-  struct bpf_object *bpf_obj_;
-  struct bpf_program *bpf_prog_;
-
-  int ifindex_;
-
-  int filter_mapfd_;
   int services_v4_mapfd_;
   int services_v6_mapfd_;
 
@@ -52,6 +44,7 @@ public:
   std::list<FilterAction> GetSupportFilterActions() const override;
 
   bool EnableFilters(std::list<FilterAction> &types) override;
+  void DisableFilter() override;
 
   bool AddWatchIpv4Port(uint16_t port) override;
   bool RemoveWatchIpv4Port(uint16_t port) override;

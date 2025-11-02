@@ -25,10 +25,11 @@ if 'linux' in target_machine.kernel()
                     'src/device/netdev_core_linux.cpp',
                     'src/device/ethernet_netdev_linux.cpp',
                     'src/device/tun_gnu_linux_impl.cpp',
+                    'src/tc/ebpf_tc_core.cpp',
+                    'src/tc/bpf_tcp_ringbuf.cpp',
                     'src/tc/tc_egress_filter.cpp',
                     'src/tc/tc_egress_filter_lite.cpp',
                     'src/tc/tc_ingress_fwd.cpp',
-                    'src/tc/bpf_tcp_ringbuf.cpp',
                     'src/tc/tc_ingress_ringbuf.cpp',
                     ]
 

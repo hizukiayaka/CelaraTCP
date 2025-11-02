@@ -17,7 +17,6 @@ class TcpService : public netio::TcpService<AddrType, TcpConnFactory>
 {
 protected:
   netdev::IPacketFilter *filter_;
-  asio::any_io_executor &exec_;
 
   asio::awaitable<netio::TcpStackState>
   ProcessParsedPacket(ebpf::BpfRingbufTcpMeta *meta,
@@ -50,11 +49,10 @@ protected:
 
 public:
   TcpService(TcpConnFactory &&conn_factory, const AddrType &local_addr,
-             uint_fast16_t local_port, netdev::IPacketFilter *filter,
-             asio::any_io_executor &exec)
+             uint_fast16_t local_port, netdev::IPacketFilter *filter)
       : netio::TcpService<AddrType, TcpConnFactory>(std::move(conn_factory),
                                                     local_addr, local_port),
-        filter_(filter), exec_(exec)
+        filter_(filter)
   {
   }
 };

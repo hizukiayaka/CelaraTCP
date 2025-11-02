@@ -6,25 +6,20 @@
 #ifndef TC_INGRESS_FORWARD_HPP_
 #define TC_INGRESS_FORWARD_HPP_
 
-#include <bpf/bpf.h>
 #include <cstdint>
-#include <experimental/propagate_const>
 #include <list>
 #include <optional>
 
+#include "ebpf_tc_core.hpp"
 #include "net_filter_inf.hpp"
 
 namespace celaratcp {
 namespace netdev {
 
-class TcIngressFwd : public IPacketFilter
+class TcIngressFwd : public EbpfTcCore, public IPacketFilter
 {
 private:
-  struct bpf_object *bpf_obj_;
-  struct bpf_program *bpf_prog_;
-
-  int ifindex_;
-
+  const int target_ifindex_;
   int v4_fwd_dict_mapfd_;
   int v6_fwd_dict_mapfd_;
 
@@ -35,6 +30,7 @@ public:
   std::list<FilterAction> GetSupportFilterActions() const override;
 
   bool EnableFilters(std::list<FilterAction> &types) override;
+  void DisableFilter() override;
 
   bool AddWatchIpv4PortForward(uint_fast16_t port,
                                uint_fast32_t ifindex) override;

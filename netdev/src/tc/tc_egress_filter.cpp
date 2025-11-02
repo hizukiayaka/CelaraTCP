@@ -5,7 +5,8 @@
 
 extern "C"
 {
-#include <bpf/libbpf.h>
+#include <bpf/bpf.h>
+#include <bpf/libbpf_common.h>
 
 #include "tun_egress.bpf.h"
 }
@@ -17,101 +18,24 @@ namespace celaratcp {
 namespace netdev {
 
 TcEgressFilter::TcEgressFilter(std::string_view ebpf_program_path, int ifindex)
-    : bpf_obj_(nullptr), bpf_prog_(nullptr), ifindex_(ifindex),
-      filter_mapfd_(-1), services_v4_mapfd_(-1), services_v6_mapfd_(-1),
-      services_mapfd_v4_list_{}, services_mapfd_v6_list_{}
+    : TcEgressFilterLite(ebpf_program_path, ifindex), services_v4_mapfd_(-1),
+      services_v6_mapfd_(-1), services_mapfd_v4_list_{},
+      services_mapfd_v6_list_{}
 {
-  struct bpf_object *obj
-      = bpf_object__open_file(ebpf_program_path.data(), nullptr);
-  if (!obj)
-    throw std::logic_error("can't open such object");
-
-  if (bpf_object__load(obj)) {
-    bpf_object__close(obj);
-    throw std::logic_error("kernel rejected obj");
-  }
-
-  bpf_obj_ = obj;
-  bpf_prog_ = bpf_object__find_program_by_name(obj, "egress_filter");
-  if (!bpf_prog_) {
-    bpf_object__close(obj);
-    throw std::logic_error("can't find the handler");
-  }
-
-  int prog_fd = bpf_program__fd(bpf_prog_);
-  if (prog_fd < 0) {
-    bpf_object__close(obj);
-    throw std::logic_error("invalid program");
-  }
-
-  LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
-              .attach_point = BPF_TC_EGRESS, );
-
-  int err = bpf_tc_hook_create(&hook);
-  if (err && err != -EEXIST) {
-    bpf_object__close(obj);
-    throw std::logic_error("can't create a tc hook");
-  }
-
-  LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = prog_fd, .flags = BPF_TC_F_REPLACE,
-              .handle = 1, .priority = 1, );
-
-  err = bpf_tc_attach(&hook, &opts);
-  if (err) {
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
-    throw std::logic_error("can't attach the tc hook");
-  }
-
-  filter_mapfd_ = bpf_object__find_map_fd_by_name(obj, "filter_list");
-  if (filter_mapfd_ < 0) {
-    bpf_tc_detach(&hook, &opts);
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
-    throw std::logic_error("program cfg table is missing");
-  }
-
   services_v4_mapfd_
-      = bpf_object__find_map_fd_by_name(obj, "services_v4_list");
+      = bpf_object__find_map_fd_by_name(bpf_obj_, "services_v4_list");
   if (services_v4_mapfd_ < 0) {
-    bpf_tc_detach(&hook, &opts);
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
     throw std::logic_error("program 2nd cfg table is missing");
   }
 
   services_v6_mapfd_
-      = bpf_object__find_map_fd_by_name(obj, "services_v6_list");
+      = bpf_object__find_map_fd_by_name(bpf_obj_, "services_v6_list");
   if (services_v6_mapfd_ < 0) {
-    bpf_tc_detach(&hook, &opts);
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
     throw std::logic_error("program 2nd cfg table is missing");
   }
 }
 
-TcEgressFilter::~TcEgressFilter()
-{
-
-  if (bpf_prog_) {
-    int prog_fd = bpf_program__fd(bpf_prog_);
-    if (prog_fd < 0) {
-      bpf_object__close(bpf_obj_);
-    } else {
-      LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex_,
-                  .attach_point = BPF_TC_EGRESS, );
-
-      LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = prog_fd,
-                  .flags = BPF_TC_F_REPLACE, .handle = 1, .priority = 1, );
-
-      bpf_tc_detach(&hook, &opts);
-      bpf_tc_hook_destroy(&hook);
-    }
-  }
-
-  if (bpf_obj_)
-    bpf_object__close(bpf_obj_);
-}
+TcEgressFilter::~TcEgressFilter() {}
 
 std::list<FilterAction>
 TcEgressFilter::GetSupportFilterActions() const
@@ -123,6 +47,11 @@ TcEgressFilter::GetSupportFilterActions() const
 bool
 TcEgressFilter::EnableFilters(std::list<FilterAction> &type)
 {
+  auto ret = AttachToNetInterface(target_ifindex_, BPF_TC_EGRESS);
+  if (!ret) {
+    return false;
+  }
+
   struct filter_list_value value = {};
   for (const auto &filter_type : type) {
     switch (filter_type) {
@@ -148,6 +77,19 @@ TcEgressFilter::EnableFilters(std::list<FilterAction> &type)
   }
 
   return true;
+}
+
+void
+TcEgressFilter::DisableFilter()
+{
+  struct filter_list_value value = {};
+
+  int key = 0;
+  if (bpf_map_update_elem(filter_mapfd_, &key, &value, BPF_ANY) != 0) {
+    return;
+  }
+
+  DetachFromNetInterface();
 }
 
 bool

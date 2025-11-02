@@ -6,26 +6,21 @@
 #ifndef TC_INGRESS_RINGBUF_HPP_
 #define TC_INGRESS_RINGBUF_HPP_
 
-#include <bpf/bpf.h>
+#include <any>
 #include <cstdint>
-#include <experimental/propagate_const>
 #include <list>
-#include <optional>
 
-#include "net_filter_inf.hpp"
 #include "bpf_tcp_ringbuf.hpp"
+#include "ebpf_tc_core.hpp"
+#include "net_filter_inf.hpp"
 
 namespace celaratcp {
 namespace netdev {
 
-class TcIngressRingbuf : public IPacketFilter
+class TcIngressRingbuf : public EbpfTcCore, public IPacketFilter
 {
 private:
-  struct bpf_object *bpf_obj_;
-  struct bpf_program *bpf_prog_;
-
-  int ifindex_;
-
+  const int target_ifindex_;
   int v4_tcp_map_mapfd_;
   int v6_tcp_map_mapfd_;
 
@@ -52,10 +47,12 @@ public:
 
   bool EnableFilters(std::list<FilterAction> &types) override;
 
-  std::any AddWatchIpv4PortRingbuf(uint_fast16_t port, asio::any_io_executor ex) override;
+  std::any AddWatchIpv4PortRingbuf(uint_fast16_t port,
+                                   asio::any_io_executor ex) override;
   bool RemoveWatchIpv4Port(uint16_t port) override;
 
-  std::any AddWatchIpv6PortRingbuf(uint_fast16_t port, asio::any_io_executor ex) override;
+  std::any AddWatchIpv6PortRingbuf(uint_fast16_t port,
+                                   asio::any_io_executor ex) override;
   bool RemoveWatchIpv6Port(uint16_t port) override;
 };
 

@@ -5,8 +5,10 @@
 
 extern "C"
 {
+#include <bpf/bpf.h>
+#include <bpf/libbpf_common.h>
+
 #include "l2_ingress_ring_l4.bpf.h"
-#include <bpf/libbpf.h>
 }
 #include <algorithm>
 
@@ -50,64 +52,18 @@ TcIngressRingbuf::GetAlignRingBufSize()
 
 TcIngressRingbuf::TcIngressRingbuf(std::string_view ebpf_program_path,
                                    int ifindex)
-    : bpf_obj_(nullptr), bpf_prog_(nullptr), ifindex_(ifindex),
-      v4_tcp_map_mapfd_(-1), v6_tcp_map_mapfd_(-1)
+    : EbpfTcCore(ebpf_program_path, "ingress_filter"),
+      target_ifindex_(ifindex), v4_tcp_map_mapfd_(-1), v6_tcp_map_mapfd_(-1)
 {
-  struct bpf_object *obj
-      = bpf_object__open_file(ebpf_program_path.data(), nullptr);
-  if (!obj)
-    throw std::logic_error("can't open such object");
-
-  if (bpf_object__load(obj)) {
-    bpf_object__close(obj);
-    throw std::logic_error("kernel rejected obj");
-  }
-
-  bpf_obj_ = obj;
-  bpf_prog_ = bpf_object__find_program_by_name(obj, "ingress_filter");
-  if (!bpf_prog_) {
-    bpf_object__close(obj);
-    throw std::logic_error("can't find the handler");
-  }
-
-  int prog_fd = bpf_program__fd(bpf_prog_);
-  if (prog_fd < 0) {
-    bpf_object__close(obj);
-    throw std::logic_error("invalid program");
-  }
-
-  LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
-              .attach_point = BPF_TC_INGRESS, );
-
-  int err = bpf_tc_hook_create(&hook);
-  if (err && err != -EEXIST) {
-    bpf_object__close(obj);
-    throw std::logic_error("can't create a tc hook");
-  }
-
-  LIBBPF_OPTS(bpf_tc_opts, opts, .prog_fd = prog_fd, .flags = BPF_TC_F_REPLACE,
-              .handle = 1, .priority = 1, );
-
-  err = bpf_tc_attach(&hook, &opts);
-  if (err) {
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
-    throw std::logic_error("can't attach the tc hook");
-  }
-
-  v4_tcp_map_mapfd_ = bpf_object__find_map_fd_by_name(obj, "v4_tcp_map_dict");
+  v4_tcp_map_mapfd_
+      = bpf_object__find_map_fd_by_name(bpf_obj_, "v4_tcp_map_dict");
   if (v4_tcp_map_mapfd_ < 0) {
-    bpf_tc_detach(&hook, &opts);
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
     throw std::logic_error("program TCPv4 table is missing");
   }
 
-  v6_tcp_map_mapfd_ = bpf_object__find_map_fd_by_name(obj, "v6_tcp_map_dict");
+  v6_tcp_map_mapfd_
+      = bpf_object__find_map_fd_by_name(bpf_obj_, "v6_tcp_map_dict");
   if (v6_tcp_map_mapfd_ < 0) {
-    bpf_tc_detach(&hook, &opts);
-    bpf_tc_hook_destroy(&hook);
-    bpf_object__close(obj);
     throw std::logic_error("program TCPv6 table is missing");
   }
 }
@@ -126,37 +82,25 @@ TcIngressRingbuf::~TcIngressRingbuf()
       close(p.map_fd);
     }
   }
-
-  if (bpf_prog_) {
-    int prog_fd = bpf_program__fd(bpf_prog_);
-    if (prog_fd < 0) {
-      bpf_object__close(bpf_obj_);
-    } else {
-      LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex_,
-                  .attach_point = BPF_TC_INGRESS, );
-
-      LIBBPF_OPTS(bpf_tc_opts, opts, .handle = 1, .priority = 1, );
-      bpf_tc_detach(&hook, &opts);
-      bpf_tc_hook_destroy(&hook);
-    }
-  }
-
-  if (bpf_obj_)
-    bpf_object__close(bpf_obj_);
 }
 
 std::list<FilterAction>
 TcIngressRingbuf::GetSupportFilterActions() const
 {
-  return { FilterAction::TCP_DPORT_FORWARD };
+  return { FilterAction::TCP_DPORT_CAPTURE };
 }
 
 bool
 TcIngressRingbuf::EnableFilters(std::list<FilterAction> &type)
 {
+  auto ret = AttachToNetInterface(target_ifindex_, BPF_TC_INGRESS);
+  if (ret != 0) {
+    return false;
+  }
+
   for (const auto &filter_type : type) {
     switch (filter_type) {
-    case FilterAction::TCP_DPORT_FORWARD:
+    case FilterAction::TCP_DPORT_CAPTURE:
       return true;
     default:
       return false;
@@ -166,7 +110,8 @@ TcIngressRingbuf::EnableFilters(std::list<FilterAction> &type)
 }
 
 std::any
-TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port, asio::any_io_executor ex)
+TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port,
+                                          asio::any_io_executor ex)
 {
   for (const auto &p : v4_tcp_maps_list_) {
     if (p.port == port) {
@@ -192,7 +137,8 @@ TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port, asio::any_io_execu
     return nullptr;
   }
 
-  auto r = std::make_shared<ebpf::EbpfTcpRingAllocator>(ex, mapfd, GetPageSize(), GetAlignRingBufSize());
+  auto r = std::make_shared<ebpf::EbpfTcpRingAllocator>(
+      ex, mapfd, GetPageSize(), GetAlignRingBufSize());
 
   PortMapFdPair pair = {
     .port = port,
@@ -206,7 +152,8 @@ TcIngressRingbuf::AddWatchIpv4PortRingbuf(uint_fast16_t port, asio::any_io_execu
 }
 
 std::any
-TcIngressRingbuf::AddWatchIpv6PortRingbuf(uint_fast16_t port, asio::any_io_executor ex)
+TcIngressRingbuf::AddWatchIpv6PortRingbuf(uint_fast16_t port,
+                                          asio::any_io_executor ex)
 {
   for (const auto &p : v6_tcp_maps_list_) {
     if (p.port == port) {
@@ -232,7 +179,8 @@ TcIngressRingbuf::AddWatchIpv6PortRingbuf(uint_fast16_t port, asio::any_io_execu
     return nullptr;
   }
 
-  auto r = std::make_shared<ebpf::EbpfTcpRingAllocator>(ex, mapfd, GetPageSize(), GetAlignRingBufSize());
+  auto r = std::make_shared<ebpf::EbpfTcpRingAllocator>(
+      ex, mapfd, GetPageSize(), GetAlignRingBufSize());
 
   PortMapFdPair pair = {
     .port = port,

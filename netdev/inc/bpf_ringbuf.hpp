@@ -44,7 +44,7 @@ class EbpfRingbufAllocator
                 "Allocator is for NetMemChunk types");
 
 private:
-  asio::any_io_executor &ex_;
+  asio::any_io_executor ex_;
   asio::posix::stream_descriptor sd_;
 
   const int map_fd_;
@@ -98,10 +98,11 @@ private:
   }
 
 public:
-  EbpfRingbufAllocator(asio::any_io_executor &ex, int map_fd,
+  EbpfRingbufAllocator(asio::any_io_executor ex, int map_fd,
                        std::size_t page_size, std::size_t data_sz)
-      : ex_(ex), sd_(ex, map_fd), map_fd_(map_fd), page_size_(page_size),
-        data_size_(data_sz), pos_mask_(data_sz - 1), returned_slices_{}
+      : ex_(std::move(ex)), sd_(ex_, map_fd), map_fd_(map_fd),
+        page_size_(page_size), data_size_(data_sz), pos_mask_(data_sz - 1),
+        returned_slices_{}
   {
     // 1. Map consumer_pos (read/write)
     void *tmp = ::mmap(nullptr, page_size_, PROT_READ | PROT_WRITE, MAP_SHARED,
