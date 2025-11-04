@@ -21,3 +21,4 @@
 #include "net_packet_allocator.hpp"
 
 #include "userspace_tcp_stack_helper.hpp"
+#include "af_packet_tx_ring_async.hpp"

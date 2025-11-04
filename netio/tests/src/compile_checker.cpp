@@ -156,15 +156,28 @@ public:
   }
 };
 
+asio::awaitable<void>
+allocation_runtime(std::span<uint8_t> buffer, std::size_t frame_size,
+                   std::size_t block_size)
+{
+  auto ex = co_await asio::this_coro::executor;
+
+  asio::generic::datagram_protocol::socket socket(ex);
+  asio::generic::datagram_protocol protocol(AF_PACKET, SOCK_DGRAM);
+  socket.open(protocol);
+
+  memmanager::AFPacketTxRingAsync<NetMemChunk> test_pool(ex, socket, buffer, frame_size,
+                                                        block_size);
+  for (;;) {
+    auto pkt = co_await test_pool.Allocate();
+  }
+}
+
 int
 main(int argc, char *argv[])
 {
-  // run2();
-
-  (void)argc;
-  (void)argv;
-
   asio::io_context ioc;
+
   auto stream = std::make_shared<asio::posix::stream_descriptor>(ioc);
 
   memmanager::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
@@ -198,6 +211,17 @@ main(int argc, char *argv[])
   auto serv = serv_factory(net1.address(), 3000);
 
   tcp_stack.AddService(serv);
+
+  constexpr std::size_t frame_size = 2048;
+  constexpr std::size_t block_size = frame_size << 1;
+  constexpr std::size_t buffer_size = block_size << 2;
+
+  std::span<uint8_t> buffer(new uint8_t[buffer_size], buffer_size);
+  asio::co_spawn(ioc, allocation_runtime(buffer, frame_size, block_size),
+                 asio::detached);
+
+  (void)argc;
+  (void)argv;
 
   return 0;
 }
