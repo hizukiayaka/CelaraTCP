@@ -94,7 +94,7 @@ bool
 TcIngressRingbuf::EnableFilters(std::list<FilterAction> &type)
 {
   auto ret = AttachToNetInterface(target_ifindex_, BPF_TC_INGRESS);
-  if (ret != 0) {
+  if (!ret) {
     return false;
   }
 

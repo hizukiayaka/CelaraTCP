@@ -44,7 +44,7 @@ bool
 TcIngressFwd::EnableFilters(std::list<FilterAction> &type)
 {
   auto ret = AttachToNetInterface(target_ifindex_, BPF_TC_INGRESS);
-  if (ret)
+  if (!ret)
     return false;
 
   for (const auto &filter_type : type) {
