@@ -20,11 +20,10 @@ namespace netio {
 class PacketSocketLinux
 {
 private:
-  std::shared_ptr<netdev::PhysicalNetdevBase> netdev_;
-
   std::experimental::propagate_const<std::unique_ptr<PacketSocketLinuxImpl> >
       pImpl_;
 
+  std::shared_ptr<netdev::PhysicalNetdevBase> netdev_;
   void CalculateTxBufSize();
 public:
   PacketSocketLinux(asio::any_io_executor &ex,

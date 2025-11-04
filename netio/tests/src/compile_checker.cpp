@@ -167,7 +167,7 @@ main(int argc, char *argv[])
   asio::io_context ioc;
   auto stream = std::make_shared<asio::posix::stream_descriptor>(ioc);
 
-  memmanger::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
+  memmanager::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
   auto hdr_pool = std::make_shared<recycle::shared_pool<NetMemChunk> >(
       [&alloc]() { return alloc.Allocation(); });
 
