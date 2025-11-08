@@ -21,7 +21,12 @@ private:
       auto pkt = co_await this->fetchPackets();
       auto buf = pkt->GetConstBuf();
 
-      co_await udp_socket_.async_send(buf, asio::use_awaitable);
+      asio::error_code ec;
+
+      co_await udp_socket_.async_send(
+          buf, asio::redirect_error(asio::use_awaitable, ec));
+      if (ec)
+        co_return;
     }
   }
 
@@ -31,11 +36,19 @@ private:
     for (;;) {
       auto pkt = co_await tx_payload_pool_->allocate();
       auto buf = pkt->GetMutableBuf();
-      auto bytes
-          = co_await udp_socket_.async_receive(buf, asio::use_awaitable);
+      asio::error_code ec;
+
+      auto bytes = co_await udp_socket_.async_receive(
+          buf, asio::redirect_error(asio::use_awaitable, ec));
+      if (ec)
+        co_return;
+
       pkt->SetUsedBytes(bytes);
-      co_await chan_tx_.async_send(asio::error_code{}, pkt,
-                                   asio::use_awaitable);
+      co_await chan_tx_.async_send(
+          asio::error_code{}, pkt,
+          asio::redirect_error(asio::use_awaitable, ec));
+      if (ec)
+        co_return;
     }
   }
 
@@ -45,7 +58,12 @@ private:
                       asio::error_code, std::shared_ptr<NetMemChunk>)> &chan)
   {
     for (;;) {
-      auto pkt = co_await chan.async_receive(asio::use_awaitable);
+      asio::error_code ec;
+      auto pkt = co_await chan.async_receive(
+          asio::redirect_error(asio::use_awaitable, ec));
+      if (ec)
+        co_return;
+
       auto hdr = co_await hdr_pool->allocate();
 
       std::forward_list<std::shared_ptr<NetPacket> > pkts = { hdr, pkt };
@@ -57,7 +75,10 @@ private:
 
       // We just call network stream object to handle, TcpStack should have
       // been updated when it fills the packets.
-      co_await asio::async_write(*nout_, std::move(bufs), asio::use_awaitable);
+      co_await asio::async_write(
+          *nout_, std::move(bufs),
+          asio::redirect_error(asio::use_awaitable, ec));
+      co_return;
     }
   }
 
@@ -295,15 +316,15 @@ main(int argc, char *argv[])
   constexpr auto kHdrSize = kIpv4HdrSize + kTcpHdrMinimalSize;
   memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kHdrSize);
   std::shared_ptr<memmanager::SharedPoolAsync<NetMemChunk> > hdr_pool
-      = std::make_shared<memmanager::SharedPoolAsync<NetMemChunk> >(exec,
-          [&hdr_alloc]() { return hdr_alloc.Allocation(); });
+      = std::make_shared<memmanager::SharedPoolAsync<NetMemChunk> >(
+          exec, [&hdr_alloc]() { return hdr_alloc.Allocation(); });
   hdr_pool->reserve(40);
 
   memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc(kRegularMtu
-                                                            - kHdrSize);
+                                                             - kHdrSize);
   std::shared_ptr<memmanager::SharedPoolAsync<NetMemChunk> > payload_pool
-      = std::make_shared<memmanager::SharedPoolAsync<NetMemChunk> >(exec,
-          [&payload_alloc]() { return payload_alloc.Allocation(); });
+      = std::make_shared<memmanager::SharedPoolAsync<NetMemChunk> >(
+          exec, [&payload_alloc]() { return payload_alloc.Allocation(); });
   payload_pool->reserve(40);
 
   auto conn_factory = [&exec, &v_netdev, &udp_port, &hdr_pool,
