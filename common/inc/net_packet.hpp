@@ -79,7 +79,8 @@ concept NetPacketWrapper
       // Case 2: T is a smart pointer to a type derived from NetPacket
       (requires {
         requires std::is_base_of_v<
-            NetPacket, typename std::pointer_traits<T>::element_type>;
+            NetPacket, typename std::pointer_traits<
+                           std::remove_reference_t<T> >::element_type>;
       });
 
 template <std::size_t... Ns>
