@@ -17,11 +17,12 @@ extern "C"
 #include <asio/detached.hpp>
 #include <asio/experimental/concurrent_channel.hpp>
 #include <asio/generic/datagram_protocol.hpp>
+#include <asio/generic/raw_protocol.hpp>
 #include <asio/redirect_error.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstdint>
@@ -49,9 +50,11 @@ MakeEndpoint(int ifindex, std::span<uint8_t> endpoint_mac,
   s.sll_protocol = htons(ethernetii);
   s.sll_ifindex = ifindex;
   s.sll_halen = static_cast<uint8_t>(std::size(endpoint_mac));
+
   std::memcpy(
       s.sll_addr, std::data(endpoint_mac),
       std::min<std::size_t>(std::size(endpoint_mac), sizeof(s.sll_addr)));
+
   asio::generic::datagram_protocol::endpoint ep{
     reinterpret_cast<struct sockaddr *>(&s), sizeof(s), SOCK_DGRAM
   };
@@ -64,8 +67,10 @@ GenerateEthernetFrame(std::span<uint8_t> dst_mac, std::span<uint8_t> src_mac,
 {
   std::array<uint8_t, ETH_HLEN> frame{};
 
-  std::memcpy(std::data(frame), std::data(dst_mac), ETH_ALEN);
-  std::memcpy(std::data(frame) + ETH_ALEN, std::data(src_mac), ETH_ALEN);
+  std::copy(std::cbegin(dst_mac), std::cend(dst_mac), std::begin(frame));
+  std::copy(std::cbegin(src_mac), std::cend(src_mac),
+            std::begin(frame) + ETH_ALEN);
+
   uint16_t *ethertype_ptr
       = reinterpret_cast<uint16_t *>(std::data(frame) + 2 * ETH_ALEN);
   *ethertype_ptr = htons(ethertype);
@@ -77,16 +82,23 @@ GenerateEthernetFrame(std::span<uint8_t> dst_mac, std::span<uint8_t> src_mac,
 
 namespace memmanager {
 
-struct mutex_locking_policy
+template <typename Value>
+class AFPacketTxRingAsyncBase
 {
-  using mutex_type = std::mutex;
-  using lock_type = std::lock_guard<mutex_type>;
+public:
+  using value_type = Value;
+  using value_ptr = std::shared_ptr<value_type>;
+
+  virtual ~AFPacketTxRingAsyncBase() = default;
+
+  virtual asio::awaitable<value_ptr> Allocate() noexcept = 0;
+};
+
+struct raw_l2_tag
+{
 };
 
 struct dgram_l3_tag
-{
-};
-struct raw_l2_tag
 {
 };
 
@@ -121,8 +133,8 @@ struct proto_traits<raw_l2_tag>
   }
 };
 
-template <typename Value, typename LinkType = dgram_l3_tag>
-class AFPacketTxRingAsync
+template <typename LinkType, typename Value>
+class AFPacketTxRingAsync : public AFPacketTxRingAsyncBase<Value>
 {
 public:
   using value_type = Value;
@@ -153,8 +165,8 @@ private:
       {
         ResetHeader();
         hdr->tp_snaplen = 0;
-        std::memcpy(std::data(frame) + hdr->tp_mac, std::data(ether_hdr),
-                    std::size(ether_hdr));
+        std::copy(std::cbegin(ether_hdr), std::cend(ether_hdr),
+                  std::begin(frame) + hdr->tp_mac);
       }
 
       explicit FrameSlice(uint32_t i, std::span<uint8_t> frame)
@@ -213,7 +225,7 @@ private:
     asio::experimental::concurrent_channel<void(asio::error_code, uint32_t)>
         pending_indices_;
 
-    socket_type &sk_;
+    socket_type sk_;
     const asio::const_buffer sent_buffer_;
     endpoint_type ep_;
     std::span<uint8_t> ether_hdr_;
@@ -443,29 +455,30 @@ private:
       }
     }
 
-    explicit impl(asio::any_io_executor &ex, socket_type &socket,
+    explicit impl(asio::any_io_executor ex, int fd,
                   std::span<uint8_t> ring_buf, std::size_t frame_size,
                   std::size_t block_size, std::span<uint8_t> ether_hdr)
         requires std::same_as<LinkType, raw_l2_tag>
-        : strand_(ex),
+        : strand_(std::move(ex)),
           notifier_(strand_),
           pending_indices_(strand_),
-          sk_(socket),
+          sk_(ex, traits::make_proto(), fd),
           sent_buffer_(nullptr, 0),
           ether_hdr_(ether_hdr)
     {
       InitFrames(ring_buf, frame_size, block_size);
     }
 
-    explicit impl(asio::any_io_executor &ex, socket_type &socket,
-                  std::span<uint8_t> ring_buf, std::size_t frame_size,
-                  std::size_t block_size, endpoint_type &&endpoint) requires
-        std::same_as<LinkType, dgram_l3_tag> : strand_(ex),
-                                               notifier_(strand_),
-                                               pending_indices_(strand_),
-                                               sk_(socket),
-                                               sent_buffer_(nullptr, 0),
-                                               ep_(std::move(endpoint))
+    explicit impl(
+        asio::any_io_executor ex, int fd, std::span<uint8_t> ring_buf,
+        std::size_t frame_size, std::size_t block_size,
+        endpoint_type &&endpoint) requires std::same_as<LinkType, dgram_l3_tag>
+        : strand_(std::move(ex)),
+          notifier_(strand_),
+          pending_indices_(strand_),
+          sk_(ex, traits::make_proto(), fd),
+          sent_buffer_(nullptr, 0),
+          ep_(std::move(endpoint))
     {
       InitFrames(ring_buf, frame_size, block_size);
     }
@@ -476,12 +489,12 @@ private:
   std::shared_ptr<impl> pool_;
 
 public:
-  AFPacketTxRingAsync(asio::any_io_executor &ex, socket_type &socket,
+  AFPacketTxRingAsync(asio::any_io_executor ex, int socket_fd,
                       std::span<uint8_t> ring_buf, std::size_t frame_size,
                       std::size_t block_size, std::span<uint8_t> ether_hdr)
       requires std::is_same_v<LinkType, raw_l2_tag>
-      : pool_(std::make_shared<impl>(ex, socket, ring_buf, frame_size,
-                                     block_size, ether_hdr))
+      : pool_(std::make_shared<impl>(std::move(ex), socket_fd, ring_buf,
+                                     frame_size, block_size, ether_hdr))
   {
     static_assert(std::is_base_of_v<NetMemChunk, Value>,
                   "Value must derive from NetMemChunk");
@@ -489,12 +502,13 @@ public:
     asio::co_spawn(ex, pool_->RecycleWorker(), asio::detached);
   }
 
-  AFPacketTxRingAsync(asio::any_io_executor &ex, socket_type &socket,
-                      std::span<uint8_t> ring_buf, std::size_t frame_size,
-                      std::size_t block_size, endpoint_type &&endpoint)
-      requires std::is_same_v<LinkType, dgram_l3_tag>
-      : pool_(std::make_shared<impl>(ex, socket, ring_buf, frame_size,
-                                     block_size, std::move(endpoint)))
+  AFPacketTxRingAsync(
+      asio::any_io_executor ex, int socket_fd, std::span<uint8_t> ring_buf,
+      std::size_t frame_size, std::size_t block_size,
+      endpoint_type &&endpoint) requires std::is_same_v<LinkType, dgram_l3_tag>
+      : pool_(std::make_shared<impl>(std::move(ex), socket_fd, ring_buf,
+                                     frame_size, block_size,
+                                     std::move(endpoint)))
   {
     static_assert(std::is_base_of_v<NetMemChunk, Value>,
                   "Value must derive from NetMemChunk");
