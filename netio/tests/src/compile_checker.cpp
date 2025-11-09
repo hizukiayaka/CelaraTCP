@@ -166,8 +166,12 @@ allocation_runtime(std::span<uint8_t> buffer, std::size_t frame_size,
   asio::generic::datagram_protocol protocol(AF_PACKET, SOCK_DGRAM);
   socket.open(protocol);
 
+  std::array<uint8_t, 6> dest_mac = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+  auto ep = netio::MakeEndpoint(-1,  dest_mac, ETH_P_IP);
+
   memmanager::AFPacketTxRingAsync<NetMemChunk> test_pool(ex, socket, buffer, frame_size,
-                                                        block_size);
+                                                        block_size, std::move(ep));
   for (;;) {
     auto pkt = co_await test_pool.Allocate();
   }
