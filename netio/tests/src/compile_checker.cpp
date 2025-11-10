@@ -125,23 +125,22 @@ run2()
 
 template <typename AddrType, typename NetworkIOObjectT,
           netio::CheckSumPolicy Policy = netio::CheckSumPolicy::IP_TCP>
-class DummyTcpConnectionChan : public netio::TcpConnection<AddrType, Policy>
+class DummyTcpConnection : public netio::TcpConnection<AddrType, Policy>
 {
 private:
   std::shared_ptr<NetworkIOObjectT> nout_;
 
 public:
-  DummyTcpConnectionChan(const AddrType &local_addr, uint_fast16_t local_port,
-                         const AddrType &remote_addr,
-                         uint_fast16_t remote_port,
-                         std::shared_ptr<NetworkIOObjectT> net_io)
+  DummyTcpConnection(const AddrType &local_addr, uint_fast16_t local_port,
+                     const AddrType &remote_addr, uint_fast16_t remote_port,
+                     std::shared_ptr<NetworkIOObjectT> net_io)
       : netio::TcpConnection<AddrType, Policy>(local_addr, local_port,
                                                remote_addr, remote_port),
         nout_(std::move(net_io))
   {
   }
 
-  ~DummyTcpConnectionChan() override = default;
+  ~DummyTcpConnection() override = default;
 
   void
   Established(uint_fast32_t, uint_fast32_t) override
@@ -156,26 +155,48 @@ public:
   }
 };
 
-asio::awaitable<void>
-allocation_runtime(std::span<uint8_t> buffer, std::size_t frame_size,
-                   std::size_t block_size)
+template <typename AddrType, typename NetworkDevT,
+          netio::CheckSumPolicy Policy = netio::CheckSumPolicy::IP_TCP>
+class DummyTcpConnectionChan
+    : public netio::TcpConnectionChan<AddrType,
+                                      std::shared_ptr< ::NetMemChunk>, Policy>
 {
-  auto ex = co_await asio::this_coro::executor;
+private:
+  std::shared_ptr<NetworkDevT> ndev_;
+  netio::PacketSocketLinux netio_;
 
-  asio::generic::datagram_protocol::socket socket(ex);
-  asio::generic::datagram_protocol protocol(AF_PACKET, SOCK_DGRAM);
-  socket.open(protocol);
-
-  std::array<uint8_t, 6> dest_mac = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-
-  auto ep = netio::MakeEndpoint(-1,  dest_mac, ETH_P_IP);
-
-  memmanager::AFPacketTxRingAsync<NetMemChunk> test_pool(ex, socket, buffer, frame_size,
-                                                        block_size, std::move(ep));
-  for (;;) {
-    auto pkt = co_await test_pool.Allocate();
+public:
+  DummyTcpConnectionChan(const AddrType &local_addr, uint_fast16_t local_port,
+                         const AddrType &remote_addr,
+                         uint_fast16_t remote_port,
+                         std::shared_ptr<NetworkDevT> net_dev,
+                         asio::any_io_executor &ex)
+      : netio::TcpConnectionChan<AddrType, std::shared_ptr< ::NetMemChunk>,
+                                 Policy>(local_addr, local_port, remote_addr,
+                                         remote_port, ex),
+        ndev_(std::move(net_dev)), netio_(ex, ndev_, true, true)
+  {
   }
-}
+
+  ~DummyTcpConnectionChan() override = default;
+
+  void
+  Established(uint_fast32_t, uint_fast32_t) override
+  {
+  }
+
+  virtual asio::awaitable<void>
+  AsyncSendReply(netio::TcpPacketType, uint_fast32_t, uint_fast32_t,
+                 uint_fast32_t) override
+  {
+    auto pkt = co_await netio_.Allocate();
+    if (!pkt)
+      co_return;
+
+    (void)pkt;
+    co_return;
+  }
+};
 
 int
 main(int argc, char *argv[])
@@ -190,15 +211,18 @@ main(int argc, char *argv[])
 
   hdr_pool->reserve(20);
 
-  auto conn_factory
-      = [&stream, &hdr_pool](const asio::ip::address_v4 &local_addr,
-                             uint_fast16_t local_port,
-                             const asio::ip::address_v4 &remote_addr,
-                             uint_fast16_t remote_port) {
-          return std::make_shared<DummyTcpConnectionChan<
-              asio::ip::address_v4, asio::posix::stream_descriptor> >(
-              local_addr, local_port, remote_addr, remote_port, stream);
-        };
+  auto e_net = std::make_shared<netdev::EthernetNetdev>("eth0");
+
+  asio::any_io_executor ex = ioc.get_executor();
+  auto conn_factory = [&ex, &e_net,
+                       &hdr_pool](const asio::ip::address_v4 &local_addr,
+                                  uint_fast16_t local_port,
+                                  const asio::ip::address_v4 &remote_addr,
+                                  uint_fast16_t remote_port) {
+    return std::make_shared<
+        DummyTcpConnectionChan<asio::ip::address_v4, netdev::EthernetNetdev> >(
+        local_addr, local_port, remote_addr, remote_port, e_net, ex);
+  };
 
   auto serv_factory = [&conn_factory](const asio::ip::address_v4 &local_addr,
                                       uint_fast16_t local_port) {
@@ -215,14 +239,6 @@ main(int argc, char *argv[])
   auto serv = serv_factory(net1.address(), 3000);
 
   tcp_stack.AddService(serv);
-
-  constexpr std::size_t frame_size = 2048;
-  constexpr std::size_t block_size = frame_size << 1;
-  constexpr std::size_t buffer_size = block_size << 2;
-
-  std::span<uint8_t> buffer(new uint8_t[buffer_size], buffer_size);
-  asio::co_spawn(ioc, allocation_runtime(buffer, frame_size, block_size),
-                 asio::detached);
 
   (void)argc;
   (void)argv;
