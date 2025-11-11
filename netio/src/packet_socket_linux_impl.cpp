@@ -10,6 +10,7 @@ extern "C"
 }
 #include <cstring>
 
+#include "logging.hpp"
 #include "packet_socket_linux_impl.hpp"
 
 namespace celaratcp {
@@ -44,6 +45,8 @@ PacketSocketLinuxImpl::BindNetworkDevice()
   if (bind(fd_, reinterpret_cast<struct sockaddr *>(&link_addr),
            sizeof(link_addr)))
   {
+    logging::error("can't bind interface index {}: {}", ifindex_, errno);
+
     return false;
   }
 

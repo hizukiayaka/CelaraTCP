@@ -6,9 +6,12 @@
 #include <numeric>
 
 #include "af_packet_tx_ring_async.hpp"
-#include "packet_socket_linux.hpp"
 #include "packet_socket_linux_impl.hpp"
 #include "physical_netdev_base.hpp"
+
+#include "logging.hpp"
+
+#include "packet_socket_linux.hpp"
 
 namespace celaratcp {
 namespace netio {
@@ -105,6 +108,9 @@ PacketSocketLinux::SetupTxPool() noexcept
    */
   req.tp_retire_blk_tov = 0;
 
+  logging::trace("frame size: {}, block size: {}, block nr: {}",
+                 req.tp_frame_size, req.tp_block_size, req.tp_block_nr);
+
   auto ret = pImpl_->SetTxRingBuf(&req);
   if (!ret)
     return false;
@@ -158,6 +164,26 @@ PacketSocketLinux::Allocate() noexcept
 
   return tx_pool_->Allocate();
 }
+
+#ifdef LOGGER_USE_SPDLOG
+std::shared_ptr<spdlog::logger>
+PacketSocketLinux::InitializePsocketLogging(
+    std::vector<spdlog::sink_ptr> sinks)
+{
+  auto logger = spdlog::get(logging::logger_name);
+
+  if (sinks.size() > 0) {
+    if (logger)
+      spdlog::drop(logging::logger_name);
+
+    logger = std::make_shared<spdlog::logger>(
+        logging::logger_name, std::begin(sinks), std::end(sinks));
+    spdlog::register_logger(logger);
+  }
+
+  return logger;
+}
+#endif
 
 } // namespace netio
 } // namespace celaratcp

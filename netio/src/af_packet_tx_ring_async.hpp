@@ -36,6 +36,7 @@ extern "C"
 #include <utility>
 #include <vector>
 
+#include "logging.hpp"
 #include "net_packet.hpp"
 
 namespace celaratcp {
@@ -167,6 +168,7 @@ private:
             l3_offset(std::size(ether_hdr))
       {
         ResetHeader();
+
         hdr->tp_snaplen = 0;
 
         std::copy(std::cbegin(ether_hdr), std::cend(ether_hdr),
@@ -392,6 +394,9 @@ private:
           co_return;
         }
 
+        netio::logging::trace("Sent out {} frames, from idx {} to {}",
+                              batch_indices.size(), *batch_indices.cbegin(),
+                              *batch_indices.crbegin());
         for (const auto &idx : batch_indices) {
           asio::post(strand_, [self = this->shared_from_this(), idx]() {
             self->Recycle(idx, 0);
@@ -406,6 +411,7 @@ private:
       asio::post(strand_, [self = this->shared_from_this()]() {
         self->notifier_.close();
         self->pending_indices_.close();
+        netio::logging::trace("Shutdown AF_PACKET committing service");
       });
     }
 
@@ -503,6 +509,8 @@ public:
     static_assert(std::is_base_of_v<NetMemChunk, Value>,
                   "Value must derive from NetMemChunk");
 
+    netio::logging::trace("Start AF_PACKET SOCK_RAW service for socket {}",
+                          socket_fd);
     asio::co_spawn(ex, pool_->RecycleWorker(), asio::detached);
   }
 
@@ -517,6 +525,8 @@ public:
     static_assert(std::is_base_of_v<NetMemChunk, Value>,
                   "Value must derive from NetMemChunk");
 
+    netio::logging::trace("Start AF_PACKET SOCK_DGRAM service for socket {}",
+                          socket_fd);
     asio::co_spawn(ex, pool_->RecycleWorker(), asio::detached);
   }
 

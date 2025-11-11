@@ -10,6 +10,10 @@
 #include <asio/awaitable.hpp>
 #include <asio/use_awaitable.hpp>
 
+#ifdef LOGGER_USE_SPDLOG
+#include <spdlog/spdlog.h>
+#endif
+
 #include "net_packet.hpp"
 
 namespace celaratcp {
@@ -51,6 +55,11 @@ public:
   bool SetupTxPool() noexcept;
 
   asio::awaitable<std::shared_ptr<NetMemChunk> > Allocate() noexcept;
+
+#ifdef LOGGER_USE_SPDLOG
+  static std::shared_ptr<spdlog::logger>
+  InitializePsocketLogging(std::vector<spdlog::sink_ptr> sinks);
+#endif
 };
 
 } // namespace netio
