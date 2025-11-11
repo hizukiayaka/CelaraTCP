@@ -4,16 +4,82 @@
  */
 
 using namespace celaratcp;
-using namespace celaratcp::netio;
+namespace app {
+namespace logging {
+#ifdef LOGGER_USE_SPDLOG
+static constexpr std::string logger_name = "tcp_wrap_udp";
 
-template <typename AddrType, typename NetworkIOObjectT,
-          CheckSumPolicy Policy = CheckSumPolicy::IP_TCP>
+inline std::shared_ptr<spdlog::logger> &
+get_logger_internal()
+{
+  static std::shared_ptr<spdlog::logger> logger = spdlog::get(logger_name);
+
+  if (!logger) {
+    throw std::logic_error("You didn't initilize the logging system");
+  }
+
+  return logger;
+}
+
+template <typename... Args>
+inline void
+trace(spdlog::format_string_t<Args...> fmt, Args &&...args)
+{
+  get_logger_internal()->trace(fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+inline void
+info(spdlog::format_string_t<Args...> fmt, Args &&...args)
+{
+  get_logger_internal()->info(fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+inline void
+warn(spdlog::format_string_t<Args...> fmt, Args &&...args)
+{
+  get_logger_internal()->warn(fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+inline void
+error(spdlog::format_string_t<Args...> fmt, Args &&...args)
+{
+  get_logger_internal()->error(fmt, std::forward<Args>(args)...);
+}
+
+#else
+template <typename... Args>
+inline void
+trace(Args &&...)
+{
+}
+template <typename... Args>
+inline void
+info(Args &&...)
+{
+}
+template <typename... Args>
+inline void
+warn(Args &&...)
+{
+}
+template <typename... Args>
+inline void
+error(Args &&...)
+{
+}
+#endif
+} // namespace logging
+
+template <typename AddrType, typename NetworkDevObjectT,
+          netio::CheckSumPolicy Policy = netio::CheckSumPolicy::IP_TCP>
 class TcpUdpSession
-    : public TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>, Policy>
+    : public netio::TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>,
+                                      Policy>
 {
 private:
-  using pool_t = memmanager::SharedPoolAsync<NetMemChunk>;
-
   asio::awaitable<void>
   tcp_receiver()
   {
@@ -25,59 +91,67 @@ private:
 
       co_await udp_socket_.async_send(
           buf, asio::redirect_error(asio::use_awaitable, ec));
-      if (ec)
+      if (ec) {
+        app::logging::error("can't forward to udp port: {}", ec.value());
         co_return;
+      }
     }
   }
 
   asio::awaitable<void>
   udp_receiver()
   {
+    constexpr auto kHdrSize = kIpv4HdrSize + kTcpHdrMinimalSize;
     for (;;) {
-      auto pkt = co_await tx_payload_pool_->allocate();
-      auto buf = pkt->GetMutableBuf();
+      auto pkt = co_await nout_socket_->Allocate();
+      if (!pkt) {
+        app::logging::error("can't allocate packet for udp receive");
+        continue;
+      }
+
+      auto b = pkt->GetData();
+      auto buf = b.subspan(kHdrSize);
+
       asio::error_code ec;
 
       auto bytes = co_await udp_socket_.async_receive(
-          buf, asio::redirect_error(asio::use_awaitable, ec));
-      if (ec)
+          asio::buffer(std::data(buf), std::size(buf)),
+          asio::redirect_error(asio::use_awaitable, ec));
+      if (ec) {
+        app::logging::error("can't receive from udp port: {}", ec.value());
         co_return;
+      }
 
       pkt->SetUsedBytes(bytes);
       co_await chan_tx_.async_send(
           asio::error_code{}, pkt,
           asio::redirect_error(asio::use_awaitable, ec));
-      if (ec)
+      if (ec) {
+        app::logging::error("can't push to pending forward chan: {}",
+                            ec.value());
         co_return;
+      }
     }
   }
 
   asio::awaitable<void>
-  udp_forward_tcp(std::shared_ptr<pool_t> hdr_pool,
-                  asio::experimental::concurrent_channel<void(
-                      asio::error_code, std::shared_ptr<NetMemChunk>)> &chan)
+  udp_forward_tcp()
   {
     for (;;) {
       asio::error_code ec;
-      auto pkt = co_await chan.async_receive(
+      auto pkt = co_await chan_tx_.async_receive(
           asio::redirect_error(asio::use_awaitable, ec));
-      if (ec)
+      if (ec) {
+        app::logging::error("receive from the pending forward chan failed: {}",
+                            ec.value());
         co_return;
+      }
 
-      auto hdr = co_await hdr_pool->allocate();
-
-      std::forward_list<std::shared_ptr<NetPacket> > pkts = { hdr, pkt };
-
-      this->AssemblePacketHeaders(TcpPacketType::ACK, pkts);
-
-      std::list<asio::const_buffer> bufs
-          = { hdr->GetConstBuf(), pkt->GetConstBuf() };
+      this->AssemblePacketHeaders(netio::TcpPacketType::ACK, pkt);
 
       // We just call network stream object to handle, TcpStack should have
       // been updated when it fills the packets.
-      co_await asio::async_write(
-          *nout_, std::move(bufs),
-          asio::redirect_error(asio::use_awaitable, ec));
+
       co_return;
     }
   }
@@ -92,30 +166,29 @@ public:
   explicit TcpUdpSession(const AddrType &local_addr, uint_fast16_t local_port,
                          const AddrType &remote_addr,
                          uint_fast16_t remote_port, asio::any_io_executor &ex,
-                         std::shared_ptr<NetworkIOObjectT> net_io,
-                         uint_fast16_t udp_port,
-                         std::shared_ptr<pool_t> tx_hdr_pool,
-                         std::shared_ptr<pool_t> tx_payload_pool)
-      : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>, Policy>(
-            local_addr, local_port, remote_addr, remote_port, ex),
-        ex_(ex), nout_(std::move(net_io)), udp_port_(udp_port),
-        local_port_(local_port), chan_tx_(ex_, 32), udp_socket_(ex_),
-        tcp_hdr_pool_(tx_hdr_pool), tx_payload_pool_(tx_payload_pool)
+                         std::shared_ptr<NetworkDevObjectT> net_dev,
+                         uint_fast16_t udp_port)
+      : netio::TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>,
+                                 Policy>(local_addr, local_port, remote_addr,
+                                         remote_port, ex),
+        ex_(ex), net_dev_(std::move(net_dev)),
+        nout_socket_{ std::make_unique<netio::PacketSocketLinux>(
+            ex, net_dev_, false, true) },
+        udp_port_(udp_port), local_port_(local_port), chan_tx_(ex_, 32),
+        udp_socket_(ex_)
   {
-#if 0
-    netdev::IPacketFilter *filter = *nout_;
-    filter->AddPeerNode(this->remote_addr_, this->remote_port_, local_port_);
-#endif
+    if (!nout_socket_) {
+      app::logging::error("can't setup packet(7) socket");
+      throw std::logic_error("can't setup packet(7) socket");
+    }
+
+    if (!nout_socket_->SetupTxPool()) {
+      app::logging::error("can't setup packet(7) TX MMAP");
+      throw std::logic_error("can't setup packet(7) TX MMAP");
+    }
   }
 
-  ~TcpUdpSession()
-  {
-#if 0
-    netdev::IPacketFilter *filter = *nout_;
-    filter->RemovePeerNode(this->remote_addr_, this->remote_port_,
-                           local_port_);
-#endif
-  }
+  ~TcpUdpSession() {}
 
   virtual void
   Established(uint_fast32_t cur_seq_num, uint_fast32_t cur_ack_num) override
@@ -127,27 +200,31 @@ public:
 
     asio::co_spawn(ex_, tcp_receiver(), asio::detached);
     asio::co_spawn(ex_, udp_receiver(), asio::detached);
-    asio::co_spawn(ex_, udp_forward_tcp(tcp_hdr_pool_, chan_tx_),
-                   asio::detached);
+    asio::co_spawn(ex_, udp_forward_tcp(), asio::detached);
 
     (void)cur_seq_num;
     (void)cur_ack_num;
   }
 
   virtual asio::awaitable<void>
-  AsyncSendReply(TcpPacketType packet_type, uint_fast32_t seq,
+  AsyncSendReply(netio::TcpPacketType packet_type, uint_fast32_t seq,
                  uint_fast32_t ack, uint_fast32_t ttl) override
   {
-    auto reply = co_await tcp_hdr_pool_->allocate();
+    auto reply = co_await nout_socket_->Allocate();
+    if (!reply) {
+      app::logging::error("can't allocate packet for reply");
+      co_return;
+    }
+
     this->AssemblePacketHeaders(packet_type, reply, seq, ack, ttl);
-    co_await asio::async_write(*nout_, reply->GetConstBuf(),
-                               asio::use_awaitable);
     co_return;
   }
 
 private:
   asio::any_io_executor &ex_;
-  std::shared_ptr<NetworkIOObjectT> nout_;
+  std::shared_ptr<NetworkDevObjectT> net_dev_;
+  std::unique_ptr<netio::PacketSocketLinux> nout_socket_;
+
   uint_fast16_t udp_port_;
   uint_fast16_t local_port_;
 
@@ -156,11 +233,6 @@ private:
       chan_tx_;
 
   asio::ip::udp::socket udp_socket_;
-
-  // IP + TCP header pool
-  std::shared_ptr<pool_t> tcp_hdr_pool_;
-
-  std::shared_ptr<pool_t> tx_payload_pool_;
 };
 
 template <typename AddrType, typename TcpConnFactory>
@@ -178,8 +250,11 @@ private:
 
       auto state
           = co_await service->ProcessParsedPacket(meta, std::move(packet));
-      // TODO: report errors
-      (void)state;
+      if (state != netio::TcpStackState::SUCCESS
+          && state != netio::TcpStackState::DROP)
+      {
+        app::logging::info("parse incoming packet failed");
+      }
     }
   }
 
@@ -200,41 +275,47 @@ public:
     auto r_ptr
         = std::any_cast<std::shared_ptr<ebpf::EbpfTcpRingAllocator> >(r);
 
+    app::logging::trace("will watch TCPv4 port {}", this->port_);
     asio::co_spawn(this->exec_, ProcessIncoming(this, r_ptr), asio::detached);
   }
 };
+} // namespace app
 
 int
 main(int argc, char *argv[])
 {
-  std::string local_interface_name, virt_interface_name;
-  std::string address;
+#ifdef LOGGER_USE_SPDLOG
+  spdlog::init_thread_pool(8192, 1);
+
+  auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+  console_sink->set_level(spdlog::level::trace);
+
+  std::vector<spdlog::sink_ptr> log_sinks{ console_sink };
+  auto netio_logger
+      = netio::PacketSocketLinux::InitializePsocketLogging(log_sinks);
+  netio_logger->set_level(spdlog::level::trace);
+
+  auto app_logger = std::make_shared<spdlog::logger>(app::logging::logger_name,
+                                                     console_sink);
+  app_logger->set_level(spdlog::level::trace);
+  spdlog::register_logger(app_logger);
+#endif
+
+  std::string local_interface_name;
   int tcp_port = 0, udp_port = 0;
 
   int opt;
   while ((opt = getopt(argc, argv, "I:a:p:")) != -1) {
     switch (opt) {
     case 'I':
-    {
-      std::string interfaces(optarg);
-      size_t colon = interfaces.find(':');
-      if (colon == std::string::npos) {
-        std::cerr << "Invalid interface format. Use <local>:<virtual net>\n";
-        return 1;
-      }
-      local_interface_name = interfaces.substr(0, colon);
-      virt_interface_name = interfaces.substr(colon + 1);
-      break;
-    }
-    case 'a':
-      address = optarg;
+      local_interface_name = optarg;
       break;
     case 'p':
     {
       std::string ports(optarg);
       size_t colon = ports.find(':');
       if (colon == std::string::npos) {
-        std::cerr << "Invalid port format. Use <tcp>:<udp>\n";
+        app::logging::error("Invalid port format. Use <tcp>:<udp>");
         return 1;
       }
       tcp_port = std::stoi(ports.substr(0, colon));
@@ -242,57 +323,33 @@ main(int argc, char *argv[])
       break;
     }
     default:
-      std::cerr << "Usage: " << argv[0]
-                << " -I <interface> -a <address> -p <tcp>:<udp>\n";
+      app::logging::error("Usage {} -I <interface> -p <tcp>:<udp>", argv[0]);
       return 1;
     }
   }
 
-  if (local_interface_name.empty() || address.empty() || tcp_port == 0
-      || udp_port == 0)
-  {
-    std::cerr
-        << "Usage: " << argv[0]
-        << " -I <interface>:<virtual netdev> -a <address> -p <tcp>:<udp>\n";
+  if (local_interface_name.empty() || tcp_port == 0 || udp_port == 0) {
+    app::logging::error("Usage {} -I <interface> -p <tcp>:<udp>", argv[0]);
     return 1;
   }
 
   asio::io_context ioc;
   asio::any_io_executor exec = ioc.get_executor();
 
-  auto local_addr = asio::ip::make_address_v4(address);
-
   auto l_netdev
       = std::make_shared<netdev::EthernetNetdev>(local_interface_name);
-  netdev::IPacketFilter *fwd_filter
+
+  netdev::IPacketFilter *filter
       = l_netdev->AttachFilter(netdev::FilterAttachPoint::TC_INGRESS);
-  if (!fwd_filter) {
-    std::cerr << "Error: Failed to load the packet forward filter.\n";
+  if (!filter) {
+    app::logging::error("Error: Failed to load the packet forward filter.");
     return 1;
   }
+
+  auto filter_list = filter->GetSupportFilterActions();
 
   std::list<netdev::FilterAction> apply_filters
       = { netdev::FilterAction::TCP_DPORT_CAPTURE };
-  if (!fwd_filter->EnableFilters(apply_filters)) {
-    std::cerr << "Error: Failed to apply the packet forward filter.\n";
-    return 1;
-  }
-
-  auto v_netdev = std::make_shared<netdev::VirtualNetDev>(
-      exec, virt_interface_name, local_addr);
-
-  auto attach_list = v_netdev->GetSupportAttachPoint();
-  netdev::IPacketFilter *filter
-      = v_netdev->AttachFilter(netdev::FilterAttachPoint::TC_EGRESS);
-
-  if (!filter) {
-    std::cerr << "Error: Failed to load the packet filter.\n";
-    return 1;
-  }
-  auto filter_list = filter->GetSupportFilterActions();
-
-  apply_filters = { netdev::FilterAction::DROP_IPV6,
-                    netdev::FilterAction::ACCEPT_TCP_ONLY };
 
   auto all_supported = std::all_of(
       apply_filters.cbegin(), apply_filters.cend(),
@@ -303,59 +360,43 @@ main(int argc, char *argv[])
 
   if (all_supported) {
     if (!filter->EnableFilters(apply_filters)) {
-      std::cerr << "Error: Failed to apply the packet filter.\n";
+      app::logging::error("Error: Failed to apply the packet filter.");
       return 1;
     }
   } else {
-    std::cerr
-        << "Error: The network device does not support all required filters."
-        << std::endl;
+    app::logging::error(
+        "Error: The network device does not support all required filters.");
     return 1;
   }
 
-  constexpr auto kHdrSize = kIpv4HdrSize + kTcpHdrMinimalSize;
-  memmanager::SimpleHeapAllocator<NetMemChunk> hdr_alloc(kHdrSize);
-  std::shared_ptr<memmanager::SharedPoolAsync<NetMemChunk> > hdr_pool
-      = std::make_shared<memmanager::SharedPoolAsync<NetMemChunk> >(
-          exec, [&hdr_alloc]() { return hdr_alloc.Allocation(); });
-  hdr_pool->reserve(40);
-
-  memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc(kRegularMtu
-                                                             - kHdrSize);
-  std::shared_ptr<memmanager::SharedPoolAsync<NetMemChunk> > payload_pool
-      = std::make_shared<memmanager::SharedPoolAsync<NetMemChunk> >(
-          exec, [&payload_alloc]() { return payload_alloc.Allocation(); });
-  payload_pool->reserve(40);
-
-  auto conn_factory = [&exec, &v_netdev, &udp_port, &hdr_pool,
-                       &payload_pool](const asio::ip::address_v4 &local_addr,
-                                      uint_fast16_t local_port,
-                                      const asio::ip::address_v4 &remote_addr,
-                                      uint_fast16_t remote_port) {
+  auto conn_factory = [&exec, &l_netdev,
+                       &udp_port](const asio::ip::address_v4 &local_addr,
+                                  uint_fast16_t local_port,
+                                  const asio::ip::address_v4 &remote_addr,
+                                  uint_fast16_t remote_port) {
     return std::make_shared<
-        TcpUdpSession<asio::ip::address_v4, netdev::VirtualNetDev> >(
-        local_addr, local_port, remote_addr, remote_port, exec, v_netdev,
-        udp_port, hdr_pool, payload_pool);
+        app::TcpUdpSession<asio::ip::address_v4, netdev::EthernetNetdev> >(
+        local_addr, local_port, remote_addr, remote_port, exec, l_netdev,
+        udp_port);
   };
 
-  auto serv_factory = [&conn_factory, &fwd_filter,
+  auto serv_factory = [&conn_factory, &filter,
                        &exec](const asio::ip::address_v4 &local_addr,
                               uint_fast16_t local_port) {
     return std::make_shared<
-        TcpServiceRingBuf<asio::ip::address_v4, decltype(conn_factory)> >(
-        std::move(conn_factory), local_addr, local_port, fwd_filter, exec);
+        app::TcpServiceRingBuf<asio::ip::address_v4, decltype(conn_factory)> >(
+        std::move(conn_factory), local_addr, local_port, filter, exec);
   };
 
-  auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(serv_factory);
+  auto tcp_stack
+      = netio::MakeAsyncTcpStack<asio::ip::address_v4>(serv_factory);
 
-  auto watch_addr = l_netdev->GetIPv4Address();
-  if (watch_addr) {
-    auto service = serv_factory(*watch_addr, tcp_port);
+  auto local_addr = l_netdev->GetIPv4Address();
+  if (local_addr) {
+    auto service = serv_factory(*local_addr, tcp_port);
     tcp_stack.AddService(service);
     service->Accept();
   }
-
-  v_netdev->Up();
 
   asio::signal_set signals(ioc, SIGINT, SIGTERM);
   signals.async_wait([&](std::error_code /*ec*/, int /*signal*/) {
@@ -367,6 +408,8 @@ main(int argc, char *argv[])
 
   t2.join();
   t1.join();
+
+  spdlog::shutdown();
 
   return 0;
 }
