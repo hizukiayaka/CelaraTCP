@@ -26,10 +26,10 @@ PacketSocketLinux::PacketSocketLinux(
 
         if (user_fill_l2) {
           return std::make_unique<PacketSocketLinuxImpl>(
-              netdev->GetInterfaceName());
+              netdev->GetInterfaceIndex(), SOCK_RAW);
         } else {
           return std::make_unique<PacketSocketLinuxImpl>(
-              netdev->GetInterfaceIndex());
+              netdev->GetInterfaceIndex(), SOCK_DGRAM);
         }
       }()),
       netdev_(netdev), is_ipv6_(is_ipv6), user_fill_l2_(user_fill_l2)

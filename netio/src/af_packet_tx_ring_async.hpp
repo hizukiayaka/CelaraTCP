@@ -150,10 +150,13 @@ private:
     struct FrameSlice
     {
       const uint32_t idx;
-      std::span<uint8_t> frame_base;
-      tpacket3_hdr *hdr;
-      /* offset from tp_net */
+      const std::span<uint8_t> frame_base;
+      struct tpacket3_hdr *const hdr;
+      /* offset from tp_mac */
       const std::size_t l3_offset;
+
+      static constexpr std::size_t kDataOffset
+          = TPACKET3_HDRLEN - sizeof(sockaddr_ll);
 
       explicit FrameSlice(uint32_t i, std::span<uint8_t> frame,
                           std::span<uint8_t> ether_hdr)
@@ -165,6 +168,7 @@ private:
       {
         ResetHeader();
         hdr->tp_snaplen = 0;
+
         std::copy(std::cbegin(ether_hdr), std::cend(ether_hdr),
                   std::begin(frame) + hdr->tp_mac);
       }
@@ -177,39 +181,39 @@ private:
             l3_offset(0)
       {
         ResetHeader();
+      }
+
+      void
+      ResetHeader()
+      {
+        hdr->tp_status = TP_STATUS_AVAILABLE;
+        hdr->tp_len = 0;
+        hdr->tp_mac = kDataOffset;
+        hdr->tp_net = kDataOffset + l3_offset;
         hdr->tp_snaplen = 0;
+        hdr->tp_next_offset = 0;
       }
 
       void
-      ResetHeader() requires std::same_as<LinkType, raw_l2_tag>
-      {
-        hdr->tp_status = TP_STATUS_AVAILABLE;
-        hdr->tp_len = 0;
-        hdr->tp_mac = sizeof(tpacket3_hdr);
-        hdr->tp_net = hdr->tp_mac;
-      }
-
-      void
-      ResetHeader() requires std::same_as<LinkType, dgram_l3_tag>
-      {
-        hdr->tp_status = TP_STATUS_AVAILABLE;
-        hdr->tp_len = 0;
-        hdr->tp_mac = sizeof(tpacket3_hdr);
-        hdr->tp_net = hdr->tp_mac + ETH_HLEN;
-      }
-
-      void
-      SetPayloadSize(std::size_t size)
+      SetPayloadSize(
+          std::size_t size) requires std::same_as<LinkType, raw_l2_tag>
       {
         hdr->tp_len = size + l3_offset;
+      }
+
+      void
+      SetPayloadSize(
+          std::size_t size) requires std::same_as<LinkType, dgram_l3_tag>
+      {
+        hdr->tp_len = size;
       }
 
       value_type *
       CreateResource()
       {
         uint8_t *payload_start
-            = std::data(frame_base) + hdr->tp_net + l3_offset;
-        size_t payload_size = std::size(frame_base) - hdr->tp_net - l3_offset;
+            = std::data(frame_base) + kDataOffset + l3_offset;
+        size_t payload_size = std::size(frame_base) - kDataOffset - l3_offset;
         return new value_type(payload_start, payload_size);
       }
     };

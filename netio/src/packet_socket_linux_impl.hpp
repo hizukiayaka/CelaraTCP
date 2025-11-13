@@ -14,7 +14,6 @@ extern "C"
 }
 
 #include <cstddef>
-#include <string_view>
 #include <span>
 
 namespace celaratcp {
@@ -23,26 +22,15 @@ namespace netio {
 class PacketSocketLinuxImpl
 {
 private:
-  enum class Mode
-  {
-    RAW,
-    DGRAM
-  };
-
   const int fd_;
-  const Mode mode_;
 
-  int ifindex_;
-  std::string_view interface_name_;
+  const int ifindex_;
 
   void *mmap_vaddr_;
   std::size_t mmap_length_;
 
 public:
-  /* for SOCK_DGRAM */
-  PacketSocketLinuxImpl(int ifindex);
-  /* for SOCK_RAW */
-  PacketSocketLinuxImpl(std::string_view interface);
+  PacketSocketLinuxImpl(int ifindex, int socket_type);
 
   ~PacketSocketLinuxImpl();
 

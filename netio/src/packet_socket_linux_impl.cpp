@@ -15,15 +15,9 @@ extern "C"
 namespace celaratcp {
 namespace netio {
 
-PacketSocketLinuxImpl::PacketSocketLinuxImpl(std::string_view interface_name)
-    : fd_(socket(PF_PACKET, SOCK_RAW, 0)), mode_{ Mode::RAW }, ifindex_(-1),
-      interface_name_(interface_name), mmap_vaddr_(MAP_FAILED)
-{
-}
-
-PacketSocketLinuxImpl::PacketSocketLinuxImpl(int ifindex)
-    : fd_(socket(PF_PACKET, SOCK_DGRAM, 0)), mode_{ Mode::DGRAM },
-      ifindex_(ifindex), interface_name_{}, mmap_vaddr_(MAP_FAILED)
+PacketSocketLinuxImpl::PacketSocketLinuxImpl(int ifindex, int socket_type)
+    : fd_(::socket(AF_PACKET, socket_type, 0)), ifindex_(ifindex),
+      mmap_vaddr_(MAP_FAILED)
 {
 }
 
@@ -36,41 +30,24 @@ PacketSocketLinuxImpl::GetSocketHandle() const noexcept
 bool
 PacketSocketLinuxImpl::BindNetworkDevice()
 {
-  if (mode_ == Mode::RAW && ifindex_ == -1) {
-    struct sockaddr link_addr{};
-    link_addr.sa_family = AF_PACKET;
-    std::memcpy(
-        link_addr.sa_data, std::data(interface_name_),
-        std::min(sizeof(link_addr.sa_data) - 1, std::size(interface_name_)));
+  struct sockaddr_ll link_addr{};
+  link_addr.sll_family = AF_PACKET;
+  /**
+   * The protocol can optionally be 0 in case we only want to transmit
+   * via this socket, which avoids an expensive call to packet_rcv().
+   * In this case, you also need to bind(2) the TX_RING
+   * with sll_protocol = 0 set.
+   */
+  link_addr.sll_protocol = 0;
+  link_addr.sll_ifindex = ifindex_;
 
-    if (bind(fd_, &link_addr, sizeof(link_addr))) {
-      return false;
-    }
-
-    return true;
-
-  } else {
-    struct sockaddr_ll link_addr{};
-    link_addr.sll_family = PF_PACKET;
-    /**
-     * The protocol can optionally be 0 in case we only want to transmit
-     * via this socket, which avoids an expensive call to packet_rcv().
-     * In this case, you also need to bind(2) the TX_RING
-     * with sll_protocol = 0 set.
-     */
-    link_addr.sll_protocol = 0;
-    link_addr.sll_ifindex = ifindex_;
-
-    if (bind(fd_, reinterpret_cast<struct sockaddr *>(&link_addr),
-             sizeof(link_addr)))
-    {
-      return false;
-    }
-
-    return true;
+  if (bind(fd_, reinterpret_cast<struct sockaddr *>(&link_addr),
+           sizeof(link_addr)))
+  {
+    return false;
   }
 
-  return false;
+  return true;
 }
 
 bool
