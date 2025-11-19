@@ -15,8 +15,7 @@
 namespace celaratcp {
 namespace netdev {
 
-class TunGnuLinuxImpl : public VirtualNetDevBase<TunGnuLinuxImpl>,
-                        public IPacketFilter
+class TunGnuLinuxImpl : public VirtualNetDevBase<TunGnuLinuxImpl>
 {
 private:
   class TunGnuLinuxDetailImpl;
@@ -55,19 +54,7 @@ public:
   bool Up() override;
   bool Down() override;
 
-  operator IPacketFilter *() override { return this; }
-
-  bool AttachFilterEbpf(const std::string &ebpf_program_path);
-  std::list<NetDevFiltertype> GetSupportFilterType() const override;
-  bool SetNetDevFilterType(std::list<NetDevFiltertype> type) override;
-  bool AddWatchIpv4Port(uint16_t port) override;
-  bool AddWatchIpv6Port(uint16_t port) override;
-  bool RemoveWatchIpv4Port(uint16_t port) override;
-  bool RemoveWatchIpv6Port(uint16_t port) override;
-  bool AddPeerNode(const asio::ip::address &addr, uint16_t src_port,
-                   uint16_t dst_port) override;
-  bool RemovePeerNode(const asio::ip::address &addr, uint16_t src_port,
-                      uint16_t dst_port) override;
+  operator IPacketFilter *() override;
 };
 
 } // namespace netdev

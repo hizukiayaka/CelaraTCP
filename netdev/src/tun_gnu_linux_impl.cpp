@@ -51,25 +51,26 @@ private:
 
   std::list<PortMapFdPair> services_mapfd_v4_list_;
   std::list<PortMapFdPair> services_mapfd_v6_list_;
+  std::function<bool(int)> on_load_ebpf_callback_;
 
   bool attachXdpProgram(const std::string &xdp_program_path);
   bool attachSteeringEbpf(const std::string &ebpf_program_path);
+  int LoadFilterEbpf(const std::string &ebpf_program_path);
 
 public:
   TunGnuLinuxDetailImpl();
   ~TunGnuLinuxDetailImpl() override;
 
-  void Initialize(const std::string &intl_name);
+  void Initialize(const std::string &intl_name,
+                  std::function<bool(int)> &&on_load_ebpf_callback);
   void AddIpv4Address(const asio::ip::address_v4 &addr);
   void AddIpv6Address(const asio::ip::address_v6 &addr);
 
   bool Up();
   bool Down();
 
-  int LoadFilterEbpf(const std::string &ebpf_program_path,
-                     std::function<bool(int prog_fd)> &&on_load_callback);
-
   std::list<NetDevFiltertype> GetSupportFilterType() const override;
+  bool LoadFilter() override;
   bool SetNetDevFilterType(std::list<NetDevFiltertype> type) override;
   bool AddWatchIpv4Port(uint16_t port) override;
   bool AddWatchIpv6Port(uint16_t port) override;
@@ -104,7 +105,8 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::~TunGnuLinuxDetailImpl()
 
 void
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::Initialize(
-    const std::string &intl_name)
+    const std::string &intl_name,
+    std::function<bool(int)> &&on_load_ebpf_callback)
 {
   ifindex_ = if_nametoindex(intl_name.c_str());
 
@@ -120,6 +122,8 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::Initialize(
     nl_socket_free(sk_);
     throw std::runtime_error("failed to get link");
   }
+
+  on_load_ebpf_callback_ = on_load_ebpf_callback;
 }
 
 void
@@ -183,7 +187,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::attachXdpProgram(
 
 bool
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::attachSteeringEbpf(
-    const std::string &ebpf_program_path)
+    [[maybe_unused]] const std::string &ebpf_program_path)
 {
   return false;
 }
@@ -193,6 +197,13 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::GetSupportFilterType() const
 {
   return { NetDevFiltertype::DROP_IPV4, NetDevFiltertype::DROP_IPV6,
            NetDevFiltertype::DROP_UDP, NetDevFiltertype::ACCEPT_4_TUPLE };
+}
+
+bool
+TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilter()
+{
+  std::string obj_path = "xmit_filter.o";
+  return LoadFilterEbpf(obj_path);
 }
 
 bool
@@ -507,8 +518,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::RemovePeerNode(
 
 int
 TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilterEbpf(
-    const std::string &ebpf_program_path,
-    std::function<bool(int prog_fd)> &&on_load_callback)
+    const std::string &ebpf_program_path)
 {
   struct bpf_object *obj
       = bpf_object__open_file(ebpf_program_path.c_str(), nullptr);
@@ -534,7 +544,7 @@ TunGnuLinuxImpl::TunGnuLinuxDetailImpl::LoadFilterEbpf(
     return false;
   }
 
-  if (!on_load_callback(prog_fd)) {
+  if (!on_load_ebpf_callback_(prog_fd)) {
     bpf_object__close(obj);
     return false;
   }
@@ -632,7 +642,11 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
 
   stream_.assign(fd);
 
-  pImpl_->Initialize(intl_name);
+  pImpl_->Initialize(intl_name, [this](int prog_fd) {
+    if (ioctl(this->stream_.native_handle(), TUNSETFILTEREBPF, prog_fd) < 0)
+      return false;
+    return true;
+  });
 
   is_master_node_ = true;
 }
@@ -646,16 +660,6 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
 }
 
 bool
-TunGnuLinuxImpl::AttachFilterEbpf(const std::string &ebpf_program_path)
-{
-  return pImpl_->LoadFilterEbpf(ebpf_program_path, [this](int prog_fd) {
-    if (ioctl(this->stream_.native_handle(), TUNSETFILTEREBPF, prog_fd) < 0)
-      return false;
-    return true;
-  });
-}
-
-bool
 TunGnuLinuxImpl::Up()
 {
   return pImpl_->Up();
@@ -666,47 +670,10 @@ TunGnuLinuxImpl::Down()
   return pImpl_->Down();
 }
 
-std::list<NetDevFiltertype>
-TunGnuLinuxImpl::GetSupportFilterType() const
+TunGnuLinuxImpl::
+operator IPacketFilter *()
 {
-  return pImpl_->GetSupportFilterType();
-}
-bool
-TunGnuLinuxImpl::SetNetDevFilterType(std::list<NetDevFiltertype> type)
-{
-  return pImpl_->SetNetDevFilterType(type);
-}
-bool
-TunGnuLinuxImpl::AddWatchIpv4Port(uint16_t port)
-{
-  return pImpl_->AddWatchIpv4Port(port);
-}
-bool
-TunGnuLinuxImpl::AddWatchIpv6Port(uint16_t port)
-{
-  return pImpl_->AddWatchIpv6Port(port);
-}
-bool
-TunGnuLinuxImpl::RemoveWatchIpv4Port(uint16_t port)
-{
-  return pImpl_->RemoveWatchIpv4Port(port);
-}
-bool
-TunGnuLinuxImpl::RemoveWatchIpv6Port(uint16_t port)
-{
-  return pImpl_->RemoveWatchIpv6Port(port);
-}
-bool
-TunGnuLinuxImpl::AddPeerNode(const asio::ip::address &addr, uint16_t src_port,
-                             uint16_t dst_port)
-{
-  return pImpl_->AddPeerNode(addr, src_port, dst_port);
-}
-bool
-TunGnuLinuxImpl::RemovePeerNode(const asio::ip::address &addr,
-                                uint16_t src_port, uint16_t dst_port)
-{
-  return pImpl_->RemovePeerNode(addr, src_port, dst_port);
+  return pImpl_.get();
 }
 
 #if 0

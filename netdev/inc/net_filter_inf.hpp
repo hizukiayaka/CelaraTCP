@@ -32,6 +32,12 @@ public:
   virtual std::list<NetDevFiltertype> GetSupportFilterType() const = 0;
 
   virtual bool
+  LoadFilter()
+  {
+    return false;
+  }
+
+  virtual bool
   SetNetDevFilterType([[maybe_unused]] std::list<NetDevFiltertype> types)
   {
     return false;
