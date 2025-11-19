@@ -24,9 +24,24 @@ private:
   struct bpf_program *steering_prog_;
   int filter_map_fd_;
 
+  int services_v4_mapfd_;
+  int services_v6_mapfd_;
+
+  struct PeerEntry {
+    asio::ip::address src_addr;
+    std::uint16_t src_port;
+};
+  struct PortMapFdPair {
+    std::uint16_t port;
+    int map_fd;
+    std::list<PeerEntry> peers;
+  };
+
+  std::list<PortMapFdPair> services_mapfd_v4_list_;
+  std::list<PortMapFdPair> services_mapfd_v6_list_;
+
   bool isMasterNode_;
   bool isClient_;
-
 private:
   TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name);
   /* it would create a new queue */
@@ -97,18 +112,17 @@ public:
   bool
   setNetDevFilterType(std::list<NetDevFiltertype> type);
 
-  bool addWatchPort(uint16_t port) {
+  bool addWatchIpv4Port(uint16_t port);
+  bool addWatchIpv6Port(uint16_t port);
+
+  bool removeWatchIpv4Port(uint16_t port) {
     return false;
   }
-
-  bool removeWatchPort(uint16_t port) {
+  bool removeWatchIpv6Port(uint16_t port) {
     return false;
   }
   bool addPeerNode(const asio::ip::address &addr, uint16_t src_port,
-                   uint16_t dst_port)
-  {
-    return false;
-  }
+                   uint16_t dst_port);
   bool removePeerNode(const asio::ip::address &addr, uint16_t src_port,
                       uint16_t dst_port)
   {

@@ -80,8 +80,12 @@ public:
 
   std::list<NetDevFiltertype> getSupportFilterType() const;
   bool setNetDevFilterType(std::list<NetDevFiltertype> types);
-  bool addWatchPort(uint16_t port);
-  bool removeWatchPort(uint16_t port);
+
+  bool addWatchIpv4Port(uint16_t port);
+  bool removeWatchIpv4Port(uint16_t port);
+  bool addWatchIpv6Port(uint16_t port);
+  bool removeWatchIpv6Port(uint16_t port);
+
   bool addPeerNode(const asio::ip::address &addr, uint16_t src_port,
                    uint16_t dst_port);
   bool removePeerNode(const asio::ip::address &addr, uint16_t src_port,

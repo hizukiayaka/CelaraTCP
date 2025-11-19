@@ -121,14 +121,24 @@ VirtualNetDev::setNetDevFilterType(std::list<NetDevFiltertype> type)
   return pImpl_->setNetDevFilterType(type);
 }
 
-bool VirtualNetDev::addWatchPort(uint16_t port)
+bool VirtualNetDev::addWatchIpv4Port(uint16_t port)
 {
-  return pImpl_->addWatchPort(port);
+  return pImpl_->addWatchIpv4Port(port);
 }
 
-bool VirtualNetDev::removeWatchPort(uint16_t port)
+bool VirtualNetDev::addWatchIpv6Port(uint16_t port)
 {
-  return pImpl_->removeWatchPort(port);
+  return pImpl_->addWatchIpv6Port(port);
+}
+
+bool VirtualNetDev::removeWatchIpv4Port(uint16_t port)
+{
+  return pImpl_->removeWatchIpv4Port(port);
+}
+
+bool VirtualNetDev::removeWatchIpv6Port(uint16_t port)
+{
+  return pImpl_->removeWatchIpv6Port(port);
 }
 
 bool VirtualNetDev::addPeerNode(const asio::ip::address &addr, uint16_t src_port, uint16_t dst_port)

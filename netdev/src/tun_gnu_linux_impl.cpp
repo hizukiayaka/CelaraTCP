@@ -123,7 +123,7 @@ VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(
 }
 
 bool
-celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachXdpProgram(
+VirtualNetDev::TunGnuLinuxImpl::attachXdpProgram(
     const std::string &xdp_program_path)
 {
   int prog_fd = bpf_obj_get(xdp_program_path.c_str());
@@ -142,7 +142,7 @@ celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachXdpProgram(
 }
 
 bool
-celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachSteeringEbpf(
+VirtualNetDev::TunGnuLinuxImpl::attachSteeringEbpf(
     const std::string &ebpf_program_path)
 {
   // Load the eBPF program
@@ -163,7 +163,7 @@ celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachSteeringEbpf(
   return true;
 }
 
-bool celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::setNetDevFilterType(std::list<NetDevFiltertype> type)
+bool VirtualNetDev::TunGnuLinuxImpl::setNetDevFilterType(std::list<NetDevFiltertype> type)
 {
   if (filter_map_fd_ < 0) {
       fprintf(stderr, "Filter map fd is not set\n");
@@ -196,8 +196,134 @@ bool celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::setNetDevFilterType(std:
   return true;
 }
 
+bool VirtualNetDev::TunGnuLinuxImpl::addWatchIpv4Port(uint16_t port)
+{
+  if (services_v4_mapfd_ < 0) {
+      fprintf(stderr, "Services v4 map fd is not set\n");
+      return false;
+  }
+  for (const auto &pair : services_mapfd_v4_list_) {
+      if (pair.port == port) {
+          return true; // Already exists
+      }
+  }
+  std::string map_name = "port_ipv4_" + std::to_string(port);
+  int inner_map_fd = bpf_map_create(BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32), sizeof(struct peer_value_v4), PER_SERVICE_MAX_CONNECTION, 0);
+  if (inner_map_fd < 0) {
+      fprintf(stderr, "Failed to create v4 inner map for port %u\n", port);
+      return false;
+  }
+  if (bpf_map_update_elem(services_v4_mapfd_, &port, &inner_map_fd, BPF_ANY) != 0) {
+      fprintf(stderr, "Failed to insert v4 inner map fd into outer map for port %u\n", port);
+      close(inner_map_fd);
+      return false;
+  }
+  PortMapFdPair pair = {port, inner_map_fd};
+  services_mapfd_v4_list_.push_back(pair);
+
+  return true;
+}
+
+bool VirtualNetDev::TunGnuLinuxImpl::addWatchIpv6Port(uint16_t port)
+{
+  if (services_v6_mapfd_ < 0) {
+      fprintf(stderr, "Services v6 map fd is not set\n");
+      return false;
+  }
+  for (const auto &pair : services_mapfd_v6_list_) {
+      if (pair.port == port) {
+          return true; // Already exists
+      }
+  }
+
+  std::string map_name = "port_ipv6_" + std::to_string(port);
+  int inner_map_fd = bpf_create_map(BPF_MAP_TYPE_ARRAY, map_name.c_str(), sizeof(__u32), sizeof(struct peer_value_v6), PER_SERVICE_MAX_CONNECTION, 0);
+  if (inner_map_fd < 0) {
+      return false;
+  }
+  if (bpf_map_update_elem(services_v6_mapfd_, &port, &inner_map_fd, BPF_ANY) != 0) {
+      close(inner_map_fd);
+      return false;
+  }
+  PortMapFdPair pair = {port, inner_map_fd};
+  services_mapfd_v6_list_.push_back(pair);
+
+  return true;
+}
+
+bool VirtualNetDev::TunGnuLinuxImpl::addPeerNode(const asio::ip::address &addr, uint16_t src_port,
+                   uint16_t dst_port)
+{
+  if (addr.is_v4()) {
+      if (services_v4_mapfd_ < 0) {
+          return false;
+      }
+      // Find the map_fd for the given dst_port
+      int map_fd = -1;
+      auto it = services_mapfd_v4_list_.end();
+      for (auto iter = services_mapfd_v4_list_.begin(); iter != services_mapfd_v4_list_.end(); ++iter) {
+          if (iter->port == dst_port) {
+              map_fd = iter->map_fd;
+              it = iter;
+              break;
+          }
+      }
+      if (map_fd < 0 || it == services_mapfd_v4_list_.end()) {
+          return false;
+      }
+      PeerEntry peer{addr, src_port};
+      auto &peers = it->peers;
+      auto found = std::find_if(peers.begin(), peers.end(), [&](const PeerEntry &p) {
+        return p.src_addr == peer.src_addr && p.src_port == peer.src_port;
+      });
+
+      if (found == peers.end()) {
+        uint32_t idx = peers.size();
+        peers.push_back(peer);
+        struct peer_value_v4 val = {peer.src_ip, peer.src_port};
+        bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
+      }
+  } else if (addr.is_v6()) {
+      if (services_v6_mapfd_ < 0) {
+          fprintf(stderr, "Services v6 map fd is not set\n");
+          return false;
+      }
+      int map_fd = -1;
+      auto it = services_mapfd_v6_list_.end();
+      for (auto iter = services_mapfd_v6_list_.begin(); iter != services_mapfd_v6_list_.end(); ++iter) {
+          if (iter->port == dst_port) {
+              map_fd = iter->map_fd;
+              it = iter;
+              break;
+          }
+      }
+      if (map_fd < 0 || it == services_mapfd_v6_list_.end()) {
+          fprintf(stderr, "No map fd found for dport %u\n", dst_port);
+          return false;
+      }
+      PeerEntry peer{addr, src_port};
+
+      auto &peers = it->peers;
+      auto found = std::find_if(peers.begin(), peers.end(), [&](const PeerEntryV6 &p) {
+        return p.src_addr == peer.src_addr && p.src_port == peer.src_port;
+      });
+
+      if (found == peers.end()) {
+        uint32_t idx = peers.size();
+        peers.push_back(peer);
+        struct peer_value_v6 val = {};
+        std::copy(peer.src_ip.begin(), peer.src_ip.end(), val.src_ip);
+        val.src_port = peer.src_port;
+        bpf_map_update_elem(map_fd, &idx, &val, BPF_ANY);
+      }
+  } else {
+      return false;
+  }
+  return true;
+}
+
 bool
-celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachFilterEbpf(
+VirtualNetDev::TunGnuLinuxImpl::attachFilterEbpf(
     const std::string &ebpf_program_path)
 {
     struct bpf_object *obj = bpf_object__open_file(ebpf_program_path.c_str(), nullptr);
@@ -235,6 +361,19 @@ celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachFilterEbpf(
     filter_map_fd_ = bpf_object__find_map_fd_by_name(obj, "filter_list");
     if (filter_map_fd_ < 0) {
         fprintf(stderr, "Failed to find map fd by name\n");
+        bpf_object__close(obj);
+        return false;
+    }
+
+    services_v4_mapfd_ = bpf_object__find_map_fd_by_name(obj, "services_v4_list");
+    if (services_v4_mapfd_ < 0) {
+        fprintf(stderr, "Failed to find services_v4_list map fd\n");
+        bpf_object__close(obj);
+        return false;
+    }
+    services_v6_mapfd_ = bpf_object__find_map_fd_by_name(obj, "services_v6_list");
+    if (services_v6_mapfd_ < 0) {
+        fprintf(stderr, "Failed to find services_v6_list map fd\n");
         bpf_object__close(obj);
         return false;
     }

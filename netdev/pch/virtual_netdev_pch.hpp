@@ -4,6 +4,7 @@
  */
 
 #include <forward_list>
+#include <list>
 #include <optional>
 
 #include <asio.hpp>
