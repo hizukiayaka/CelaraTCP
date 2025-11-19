@@ -3,6 +3,10 @@
  * SPDX-FileCopyrightText: Hsia-Jun(Randy) Li
  */
 
+extern "C" {
+#include "ebpf/xmit_filter.bpf.h"
+}
+
 namespace celaratcp {
 namespace netdev {
 
@@ -10,6 +14,9 @@ VirtualNetDev::TunGnuLinuxImpl::~TunGnuLinuxImpl()
 {
   nl_socket_free(sk_);
   stream_.close();
+
+  if (filter_obj_)
+    bpf_object__close(filter_obj_);
 }
 
 #if 0
@@ -156,25 +163,83 @@ celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachSteeringEbpf(
   return true;
 }
 
+bool celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::setNetDevFilterType(std::list<NetDevFiltertype> type)
+{
+  if (filter_map_fd_ < 0) {
+      fprintf(stderr, "Filter map fd is not set\n");
+      return false;
+  }
+
+  struct filter_list_value value = {};
+  for (const auto &filter_type : type) {
+      switch (filter_type) {
+          case NetDevFiltertype::DROP_IPV4:
+              value.drop_ipv4 = 1;
+              break;
+          case NetDevFiltertype::DROP_IPV6:
+              value.drop_ipv6 = 1;
+              break;
+          case NetDevFiltertype::DROP_DEST_IP_PORT:
+              value.drop_nomatch_tcp = 1;
+              break;
+          default:
+              fprintf(stderr, "Unknown filter type\n");
+              return false;
+      }
+  }
+      int key = 0;
+      if (bpf_map_update_elem(filter_map_fd_, &key, &value, BPF_ANY) != 0) {
+          perror("bpf_map_update_elem failed");
+          return false;
+      }
+
+  return true;
+}
+
 bool
 celaratcp::netdev::VirtualNetDev::TunGnuLinuxImpl::attachFilterEbpf(
     const std::string &ebpf_program_path)
 {
-  // Load the eBPF program
-  int prog_fd = bpf_obj_get(ebpf_program_path.c_str());
-  if (prog_fd < 0) {
-      perror("Failed to load eBPF program");
-      return false;
-  }
+    struct bpf_object *obj = bpf_object__open_file(ebpf_program_path.c_str(), nullptr);
+    if (!obj) {
+        fprintf(stderr, "Failed to open eBPF object file\n");
+        return false;
+    }
+    if (bpf_object__load(obj)) {
+        fprintf(stderr, "Failed to load eBPF object\n");
+        bpf_object__close(obj);
+        return false;
+    }
 
-  if (ioctl(stream_.native_handle(), TUNSETFILTEREBPF, prog_fd) < 0) {
-      perror("Failed to attach eBPF program with TUNSETFILTEREBPF");
-      close(prog_fd);
-      return false;
-  }
+    filter_obj_ = obj;
+    filter_prog_ = bpf_object__find_program_by_name(obj, "socket_handler");
+    if (!filter_prog_) {
+        fprintf(stderr, "Failed to find eBPF program by name\n");
+        bpf_object__close(obj);
+        return false;
+    }
 
-  close(prog_fd);
-  return true;
+    int prog_fd = bpf_program__fd(filter_prog_);
+    if (prog_fd < 0) {
+        fprintf(stderr, "Failed to get program fd\n");
+        bpf_object__close(obj);
+        return false;
+    }
+
+    if (ioctl(stream_.native_handle(), TUNSETFILTEREBPF, prog_fd) < 0) {
+        perror("Failed to attach eBPF program with TUNSETFILTEREBPF");
+        bpf_object__close(obj);
+        return false;
+    }
+
+    filter_map_fd_ = bpf_object__find_map_fd_by_name(obj, "filter_list");
+    if (filter_map_fd_ < 0) {
+        fprintf(stderr, "Failed to find map fd by name\n");
+        bpf_object__close(obj);
+        return false;
+    }
+
+    return true;
 }
 
 void

@@ -18,6 +18,12 @@ private:
   struct rtnl_link *link_;
   int ifindex_;
 
+  struct bpf_object *filter_obj_;
+  struct bpf_object *steering_obj_;
+  struct bpf_program *filter_prog_;
+  struct bpf_program *steering_prog_;
+  int filter_map_fd_;
+
   bool isMasterNode_;
   bool isClient_;
 
@@ -89,10 +95,7 @@ public:
   }
 
   bool
-  setNetDevFilterType(std::list<NetDevFiltertype> type)
-  {
-    return false;
-  }
+  setNetDevFilterType(std::list<NetDevFiltertype> type);
 
   bool addWatchPort(uint16_t port) {
     return false;

@@ -23,6 +23,7 @@
 #include <netlink/route/link.h>
 
 #include <bpf/bpf.h>
+#include <bpf/libbpf.h>
 
 #include "tun_gnu_linux_impl.hpp"
 #endif
