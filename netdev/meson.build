@@ -22,3 +22,4 @@ netdev_dep = declare_dependency(link_with: netdev,
 )
 
 subdir('tests')
+subdir('ebpf')
