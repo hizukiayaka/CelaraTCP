@@ -15,6 +15,8 @@
 #include <asio/experimental/channel.hpp>
 #include <asio/experimental/coro.hpp>
 
+#include <recycle/shared_pool.hpp>
+
 #include "net_packet.hpp"
 #include "net_packet_allocator.hpp"
 
