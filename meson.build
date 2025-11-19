@@ -13,6 +13,8 @@ project(
 
 add_project_arguments('-fcoroutines', language: ['cpp'])
 
+subdir('contrib')
+
 celaratcp_com_inc = include_directories('common/inc')
 
 subdir('netio')
