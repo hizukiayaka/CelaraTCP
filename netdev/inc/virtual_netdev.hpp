@@ -3,31 +3,33 @@
  * SPDX-FileCopyrightText: Hsia-Jun(Randy) Li
  */
 
-#ifndef TUN_GNU_LINUX_IMPL_HPP
-#define TUN_GNU_LINUX_IMPL_HPP
+#ifndef _VIRTUAL_NETDEV_HPP_
+#define _VIRTUAL_NETDEV_HPP_
+
+#include <experimental/propagate_const>
+#include <forward_list>
+#include <memory>
+
+#include <asio.hpp>
+#include <asio/spawn.hpp>
+
+#include "net_packet.hpp"
 
 namespace celaratcp {
 namespace netdev {
 
-class VirtualNetDev::TunGnuLinuxImpl
+class VirtualNetDev
 {
 private:
-  bool isMasterNode_;
-  bool isClient_;
-  asio::posix::stream_descriptor stream_;
+#ifdef __gnu_linux__
+  class TunGnuLinuxImpl;
+  std::experimental::propagate_const<std::unique_ptr<TunGnuLinuxImpl> > pImpl_;
+#endif
 
-  struct nl_sock *sk_;
-  int ifindex_;
-
-private:
-  TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name);
-  /* it would create a new queue */
-  // TunGnuLinuxImpl (const TunGnuLinuxImpl &other);
 public:
-  ~TunGnuLinuxImpl();
-  /* client peer */
-  TunGnuLinuxImpl(asio::io_context &io_context, const std::string &intl_name,
-                  const asio::ip::address_v4 &addr);
+  VirtualNetDev(asio::io_context &io_context, const std::string &intl_name,
+                const asio::ip::address_v4 &addr);
+  ~VirtualNetDev();
 
   template <typename MutableBufferSequence>
   void async_read(MutableBufferSequence &bufs, asio::yield_context yield);
@@ -42,13 +44,12 @@ public:
   void async_write(std::forward_list<std::shared_ptr<NetPacket> > packets,
                    asio::yield_context yield);
 
-  // std::optional<TunGnuLinuxImpl> addNode(asio::ip::address_v4 &addr);
-
   bool up();
   bool down();
 };
 
-}
-}
+} // namespace netdev
 
-#endif
+} // namespace celaratcp
+
+#endif // _VIRTUAL_NETDEV_HPP_

@@ -6,7 +6,11 @@
 namespace celaratcp {
 namespace netdev {
 
-TunGnuLinuxImpl::~TunGnuLinuxImpl() { nl_socket_free(sk_); }
+VirtualNetDev::TunGnuLinuxImpl::~TunGnuLinuxImpl()
+{
+  nl_socket_free(sk_);
+  stream_.close();
+}
 
 #if 0
 // FIXME: we should not use the default io_context
@@ -39,8 +43,8 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(const TunGnuLinuxImpl &other)
 }
 #endif
 
-TunGnuLinuxImpl::TunGnuLinuxImpl(asio::io_context &io_context,
-                                 const std::string &intl_name)
+VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(asio::io_context &io_context,
+                                                const std::string &intl_name)
     : stream_(io_context) // Initialize stream_ with an executor
 {
   struct ifreq ifr;
@@ -79,9 +83,9 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::io_context &io_context,
   isMasterNode_ = true;
 }
 
-TunGnuLinuxImpl::TunGnuLinuxImpl(asio::io_context &io_context,
-                                 const std::string &intl_name,
-                                 const asio::ip::address_v4 &addr)
+VirtualNetDev::TunGnuLinuxImpl::TunGnuLinuxImpl(
+    asio::io_context &io_context, const std::string &intl_name,
+    const asio::ip::address_v4 &addr)
     : TunGnuLinuxImpl(io_context, intl_name)
 {
   isClient_ = true;
@@ -103,27 +107,32 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::io_context &io_context,
   rtnl_addr_put(rt_addr);
 }
 
-template<typename MutableBufferSequence>
-void TunGnuLinuxImpl::async_read(MutableBufferSequence& bufs, asio::yield_context yield)
+template <typename MutableBufferSequence>
+void
+VirtualNetDev::TunGnuLinuxImpl::async_read(MutableBufferSequence &bufs,
+                                           asio::yield_context yield)
 {
   asio::async_read(stream_, bufs, std::move(yield));
 }
 
-template<typename ConstBufferSequence>
-void TunGnuLinuxImpl::async_write(ConstBufferSequence& bufs, asio::yield_context yield)
+template <typename ConstBufferSequence>
+void
+VirtualNetDev::TunGnuLinuxImpl::async_write(ConstBufferSequence &bufs,
+                                            asio::yield_context yield)
 {
   asio::async_write(stream_, bufs, std::move(yield));
 }
 
 void
-TunGnuLinuxImpl::async_read(NetPacket &buf, asio::yield_context yield)
+VirtualNetDev::TunGnuLinuxImpl::async_read(NetPacket &buf,
+                                           asio::yield_context yield)
 {
   auto mbuf = buf.getMutableBuf();
   asio::async_read(stream_, mbuf, yield);
 }
 
 void
-TunGnuLinuxImpl::async_read(
+VirtualNetDev::TunGnuLinuxImpl::async_read(
     std::forward_list<std::shared_ptr<NetPacket> > packets,
     asio::yield_context yield)
 {
@@ -137,14 +146,15 @@ TunGnuLinuxImpl::async_read(
 }
 
 void
-TunGnuLinuxImpl::async_write(NetPacket &buf, asio::yield_context yield)
+VirtualNetDev::TunGnuLinuxImpl::async_write(NetPacket &buf,
+                                            asio::yield_context yield)
 {
   auto cbuf = buf.getConstBuf();
   asio::async_write(stream_, cbuf, yield);
 }
 
 void
-TunGnuLinuxImpl::async_write(
+VirtualNetDev::TunGnuLinuxImpl::async_write(
     std::forward_list<std::shared_ptr<NetPacket> > packets,
     asio::yield_context yield)
 {
@@ -157,10 +167,45 @@ TunGnuLinuxImpl::async_write(
   asio::async_write(stream_, cbufs, yield);
 }
 
-std::optional<TunGnuLinuxImpl>
-TunGnuLinuxImpl::addNode(asio::ip::address_v4 &addr)
+bool
+VirtualNetDev::TunGnuLinuxImpl::up()
 {
 #if 0
+  struct ifreq ifr;
+  memset(&ifr, 0, sizeof(ifr));
+  strncpy(ifr.ifr_name, stream_.native_handle(), IFNAMSIZ);
+  if (ioctl(stream_.native_handle(), SIOCGIFFLAGS, &ifr) < 0)
+    return false;
+
+  ifr.ifr_flags |= IFF_UP;
+  if (ioctl(stream_.native_handle(), SIOCSIFFLAGS, &ifr) < 0)
+    return false;
+#endif
+  return true;
+}
+
+bool
+VirtualNetDev::TunGnuLinuxImpl::down()
+{
+#if 0
+  struct ifreq ifr;
+  memset(&ifr, 0, sizeof(ifr));
+  strncpy(ifr.ifr_name, stream_.native_handle(), IFNAMSIZ);
+  if (ioctl(stream_.native_handle(), SIOCGIFFLAGS, &ifr) < 0)
+    return false;
+
+  ifr.ifr_flags &= ~IFF_UP;
+  if (ioctl(stream_.native_handle(), SIOCSIFFLAGS, &ifr) < 0)
+    return false;
+#endif
+
+  return true;
+}
+
+#if 0
+std::optional<TunGnuLinuxImpl>
+VirtualNetDev::TunGnuLinuxImpl::addNode(asio::ip::address_v4 &addr)
+{
   TunGnuLinuxImpl node(*this); // Use the copy constructor to create a copy
   node.isMasterNode_ = false;
   auto rt_entry = rtnl_route_alloc();
@@ -182,9 +227,10 @@ TunGnuLinuxImpl::addNode(asio::ip::address_v4 &addr)
   rtnl_route_put(rt_entry);
 
   return std::make_optional<TunGnuLinuxImpl>(std::move(node));
-#endif
   return std::nullopt;
 }
+#endif
 
-}
-}
+} // namespace netdev
+
+} // namespace celaratcp
