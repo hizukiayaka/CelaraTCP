@@ -17,6 +17,8 @@ extern "C"
 #include "xmit_filter.bpf.h"
 }
 
+#include "tun_gnu_linux_impl.hpp"
+
 namespace celaratcp {
 namespace netdev {
 
