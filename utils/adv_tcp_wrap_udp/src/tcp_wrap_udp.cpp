@@ -90,7 +90,8 @@ private:
       asio::error_code ec;
 
       co_await udp_socket_.async_send(
-          buf, asio::redirect_error(asio::use_awaitable, ec));
+          buf, asio::bind_executor(
+                   strand_, asio::redirect_error(asio::use_awaitable, ec)));
       if (ec) {
         app::logging::error("can't forward to udp port: {}", ec.value());
         co_return;
@@ -116,7 +117,9 @@ private:
 
       auto bytes = co_await udp_socket_.async_receive(
           asio::buffer(std::data(buf), std::size(buf)),
-          asio::redirect_error(asio::use_awaitable, ec));
+          asio::bind_executor(strand_,
+                              asio::redirect_error(asio::use_awaitable, ec)));
+
       if (ec) {
         app::logging::error("can't receive from udp port: {}", ec.value());
         co_return;
@@ -171,7 +174,7 @@ public:
       : netio::TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>,
                                  Policy>(local_addr, local_port, remote_addr,
                                          remote_port, ex),
-        ex_(ex), net_dev_(std::move(net_dev)),
+        ex_(ex), strand_(ex_), net_dev_(std::move(net_dev)),
         nout_socket_{ std::make_unique<netio::PacketSocketLinux>(
             ex, net_dev_, false, true) },
         udp_port_(udp_port), local_port_(local_port), chan_tx_(ex_, 32),
@@ -222,6 +225,7 @@ public:
 
 private:
   asio::any_io_executor &ex_;
+  asio::strand<asio::any_io_executor> strand_;
   std::shared_ptr<NetworkDevObjectT> net_dev_;
   std::unique_ptr<netio::PacketSocketLinux> nout_socket_;
 

@@ -15,12 +15,14 @@ extern "C"
 #include <thread>
 
 #include <asio/awaitable.hpp>
+#include <asio/bind_executor.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/experimental/concurrent_channel.hpp>
 #include <asio/ip/udp.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/signal_set.hpp>
+#include <asio/strand.hpp>
 
 #ifdef LOGGER_USE_SPDLOG
 #include <spdlog/async.h>

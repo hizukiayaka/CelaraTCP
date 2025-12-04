@@ -21,7 +21,12 @@ private:
       auto pkt = co_await this->fetchPackets();
       auto buf = pkt->GetConstBuf();
 
-      co_await udp_socket_.async_send(buf, asio::use_awaitable);
+      asio::error_code ec;
+      co_await udp_socket_.async_send(
+          buf, asio::bind_executor(udp_strand_, asio::redirect_error(
+                                                    asio::use_awaitable, ec)));
+      if (ec)
+        co_return;
     }
   }
 
@@ -31,8 +36,14 @@ private:
     for (;;) {
       auto pkt = tx_payload_pool_->allocate();
       auto buf = pkt->GetMutableBuf();
-      auto bytes
-          = co_await udp_socket_.async_receive(buf, asio::use_awaitable);
+
+      asio::error_code ec;
+      auto bytes = co_await udp_socket_.async_receive(
+          buf, asio::bind_executor(udp_strand_, asio::redirect_error(
+                                                    asio::use_awaitable, ec)));
+      if (ec)
+        co_return;
+
       pkt->SetUsedBytes(bytes);
       co_await chan_tx_.async_send(asio::error_code{}, pkt,
                                    asio::use_awaitable);
@@ -79,7 +90,8 @@ public:
             local_addr, local_port, remote_addr, remote_port, ex),
         ex_(ex), nout_(std::move(net_io)), udp_port_(udp_port),
         local_port_(local_port), chan_tx_(ex_, 32), udp_socket_(ex_),
-        tcp_hdr_pool_(tx_hdr_pool), tx_payload_pool_(tx_payload_pool)
+        tcp_hdr_pool_(tx_hdr_pool), tx_payload_pool_(tx_payload_pool),
+        udp_strand_(ex)
   {
 #if 0
     netdev::IPacketFilter *filter = *nout_;
@@ -139,6 +151,7 @@ private:
   std::shared_ptr<pool_t> tcp_hdr_pool_;
 
   std::shared_ptr<pool_t> tx_payload_pool_;
+  asio::strand<asio::any_io_executor> udp_strand_;
 };
 
 /*
@@ -266,7 +279,7 @@ main(int argc, char *argv[])
   hdr_pool->reserve(40);
 
   memmanager::SimpleHeapAllocator<NetMemChunk> payload_alloc(kRegularMtu
-                                                            - kHdrSize);
+                                                             - kHdrSize);
   std::shared_ptr<recycle::shared_pool<NetMemChunk> > payload_pool
       = std::make_shared<recycle::shared_pool<NetMemChunk> >(
           [&payload_alloc]() { return payload_alloc.Allocation(); });
