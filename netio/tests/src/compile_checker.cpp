@@ -125,7 +125,8 @@ run2()
 
 template <typename AddrType, typename NetworkIOObjectT,
           netio::CheckSumPolicy Policy = netio::CheckSumPolicy::IP_TCP>
-class DummyTcpConnection : public netio::TcpConnection<AddrType, Policy>
+class DummyTcpConnection
+    : public netio::TcpConnection<AddrType, std::shared_ptr<NetPacket>, Policy>
 {
 private:
   std::shared_ptr<NetworkIOObjectT> nout_;
@@ -134,8 +135,8 @@ public:
   DummyTcpConnection(const AddrType &local_addr, uint_fast16_t local_port,
                      const AddrType &remote_addr, uint_fast16_t remote_port,
                      std::shared_ptr<NetworkIOObjectT> net_io)
-      : netio::TcpConnection<AddrType, Policy>(local_addr, local_port,
-                                               remote_addr, remote_port),
+      : netio::TcpConnection<AddrType, std::shared_ptr<NetPacket>, Policy>(
+            local_addr, local_port, remote_addr, remote_port),
         nout_(std::move(net_io))
   {
   }
@@ -158,8 +159,8 @@ public:
 template <typename AddrType, typename NetworkDevT,
           netio::CheckSumPolicy Policy = netio::CheckSumPolicy::IP_TCP>
 class DummyTcpConnectionChan
-    : public netio::TcpConnectionChan<AddrType,
-                                      std::shared_ptr< ::NetMemChunk>, Policy>
+    : public netio::TcpConnection<AddrType, std::shared_ptr< ::NetMemChunk>,
+                                  Policy>
 {
 private:
   std::shared_ptr<NetworkDevT> ndev_;
@@ -171,9 +172,9 @@ public:
                          uint_fast16_t remote_port,
                          std::shared_ptr<NetworkDevT> net_dev,
                          asio::any_io_executor &ex)
-      : netio::TcpConnectionChan<AddrType, std::shared_ptr< ::NetMemChunk>,
-                                 Policy>(local_addr, local_port, remote_addr,
-                                         remote_port, ex),
+      : netio::TcpConnection<AddrType, std::shared_ptr< ::NetMemChunk>,
+                             Policy>(local_addr, local_port, remote_addr,
+                                     remote_port, ex),
         ndev_(std::move(net_dev)), netio_(ex, ndev_, true, true)
   {
   }
@@ -202,6 +203,7 @@ int
 main(int argc, char *argv[])
 {
   asio::io_context ioc;
+  asio::any_io_executor exec = ioc.get_executor();
 
   memmanager::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
   auto hdr_pool = std::make_shared<recycle::shared_pool<NetMemChunk> >(
@@ -233,13 +235,13 @@ main(int argc, char *argv[])
   };
 
   auto tcp_stack
-      = netio::MakeAsyncTcpStack<asio::ip::address_v4>(serv_factory);
+      = netio::MakeAsyncTcpStack<asio::ip::address_v4>(exec, serv_factory);
 
   asio::ip::network_v4 net1(asio::ip::make_address_v4("169.254.3.1"), 32);
   // The correct address should be the peer address of the tun/tap device
   auto serv = serv_factory(net1.address(), 3000);
 
-  tcp_stack.AddService(serv);
+  asio::co_spawn(exec, tcp_stack.AddService(serv), asio::detached);
 
   (void)argc;
   (void)argv;
