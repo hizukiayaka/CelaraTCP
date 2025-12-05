@@ -9,7 +9,7 @@ using namespace celaratcp::netio;
 template <typename AddrType, typename NetworkIOObjectT,
           CheckSumPolicy Policy = CheckSumPolicy::IP_TCP>
 class TcpUdpSession
-    : public TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>, Policy>
+    : public TcpConnection<AddrType, std::shared_ptr<NetMemChunk>, Policy>
 {
 private:
   using pool_t = recycle::shared_pool<NetMemChunk>;
@@ -86,7 +86,7 @@ public:
                          uint_fast16_t udp_port,
                          std::shared_ptr<pool_t> tx_hdr_pool,
                          std::shared_ptr<pool_t> tx_payload_pool)
-      : TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>, Policy>(
+      : TcpConnection<AddrType, std::shared_ptr<NetMemChunk>, Policy>(
             local_addr, local_port, remote_addr, remote_port, ex),
         ex_(ex), nout_(std::move(net_io)), udp_port_(udp_port),
         local_port_(local_port), chan_tx_(ex_, 32), udp_socket_(ex_),
@@ -154,6 +154,7 @@ private:
   asio::strand<asio::any_io_executor> udp_strand_;
 };
 
+namespace app {
 /*
  * the allocated buf from hdr_pool and payload_pool should be
  * able to be written by the netio.
@@ -177,8 +178,8 @@ NetIncoming(auto netio, auto &tcp_stack, auto hdr_pool, auto payload_pool)
       if (pkt_size >= 0) {
         hdr->SetUsedBytes(hdr_size);
         pkt->SetUsedBytes(pkt_size);
-        auto state
-            = co_await tcp_stack.ProcessIncomingPackets(std::move(chunks));
+        auto state = co_await tcp_stack.ProcessIncomingPackets(
+            std::move(chunks), asio::use_awaitable);
         // TODO: report errors
         (void)state;
         break;
@@ -187,6 +188,23 @@ NetIncoming(auto netio, auto &tcp_stack, auto hdr_pool, auto payload_pool)
     }
   }
 }
+
+asio::awaitable<void>
+ServiceSetup(auto &tcp_stack, auto service, auto netio, auto hdr_pool,
+             auto payload_pool)
+{
+  bool added = co_await tcp_stack.AddService(service);
+  if (!added) {
+    std::cerr << "Error: Failed to add service.\n";
+    co_return;
+  }
+
+  auto ex = co_await asio::this_coro::executor;
+  asio::co_spawn(ex, NetIncoming(netio, tcp_stack, hdr_pool, payload_pool),
+                 asio::detached);
+}
+
+} // namespace app
 
 int
 main(int argc, char *argv[])
@@ -303,14 +321,15 @@ main(int argc, char *argv[])
         std::move(conn_factory), local_addr, local_port);
   };
 
-  auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(serv_factory);
+  auto tcp_stack = MakeAsyncTcpStack<asio::ip::address_v4>(exec, serv_factory);
 
   auto peer_addr = netdev->GetPeerIPv4Address();
   auto service = serv_factory(peer_addr, tcp_port);
-  tcp_stack.AddService(service);
 
-  asio::co_spawn(exec, NetIncoming(netdev, tcp_stack, hdr_pool, payload_pool),
-                 asio::detached);
+  asio::co_spawn(
+      exec,
+      app::ServiceSetup(tcp_stack, service, netdev, hdr_pool, payload_pool),
+      asio::detached);
 
   // filter->AddWatchIpv4Port(tcp_port);
   netdev->Up();

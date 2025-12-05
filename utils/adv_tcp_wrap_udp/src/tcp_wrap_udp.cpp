@@ -76,8 +76,8 @@ error(Args &&...)
 template <typename AddrType, typename NetworkDevObjectT,
           netio::CheckSumPolicy Policy = netio::CheckSumPolicy::IP_TCP>
 class TcpUdpSession
-    : public netio::TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>,
-                                      Policy>
+    : public netio::TcpConnection<AddrType, std::shared_ptr<NetMemChunk>,
+                                  Policy>
 {
 private:
   asio::awaitable<void>
@@ -171,9 +171,8 @@ public:
                          uint_fast16_t remote_port, asio::any_io_executor &ex,
                          std::shared_ptr<NetworkDevObjectT> net_dev,
                          uint_fast16_t udp_port)
-      : netio::TcpConnectionChan<AddrType, std::shared_ptr<NetMemChunk>,
-                                 Policy>(local_addr, local_port, remote_addr,
-                                         remote_port, ex),
+      : netio::TcpConnection<AddrType, std::shared_ptr<NetMemChunk>, Policy>(
+            local_addr, local_port, remote_addr, remote_port, ex),
         ex_(ex), strand_(ex_), net_dev_(std::move(net_dev)),
         nout_socket_{ std::make_unique<netio::PacketSocketLinux>(
             ex, net_dev_, false, true) },
@@ -283,6 +282,20 @@ public:
     asio::co_spawn(this->exec_, ProcessIncoming(this, r_ptr), asio::detached);
   }
 };
+
+asio::awaitable<void>
+ServiceSetup(auto &tcp_stack, auto service)
+{
+  bool added = co_await tcp_stack.AddService(service);
+  if (!added) {
+    logging::error("Failed to add service for port {}", service->GetPort());
+    co_return;
+  }
+
+  service->Accept();
+  co_return;
+}
+
 } // namespace app
 
 int
@@ -393,13 +406,13 @@ main(int argc, char *argv[])
   };
 
   auto tcp_stack
-      = netio::MakeAsyncTcpStack<asio::ip::address_v4>(serv_factory);
+      = netio::MakeAsyncTcpStack<asio::ip::address_v4>(exec, serv_factory);
 
   auto local_addr = l_netdev->GetIPv4Address();
   if (local_addr) {
     auto service = serv_factory(*local_addr, tcp_port);
-    tcp_stack.AddService(service);
-    service->Accept();
+    asio::co_spawn(exec, app::ServiceSetup(tcp_stack, service),
+                   asio::detached);
   }
 
   asio::signal_set signals(ioc, SIGINT, SIGTERM);
