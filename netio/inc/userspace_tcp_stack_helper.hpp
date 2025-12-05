@@ -222,6 +222,7 @@ public:
     auto tcp = std::data(packet.GetData().subspan(ip_payload_offset));
 
     auto dst_port = ntohs(*reinterpret_cast<const uint16_t *>(tcp + 2));
+    // TODO: strand here
     auto it = std::find_if(
         this->services_.begin(), this->services_.end(),
         [dst_port](const std::shared_ptr<TcpServiceT> &service) {
@@ -234,162 +235,62 @@ public:
 
     auto src_port = ntohs(*reinterpret_cast<const uint16_t *>(tcp));
     auto tcp_flags = static_cast<uint8_t>(tcp[13]);
-    if (tcp_flags == 0x12) {
-      // SYN-ACK
-      auto conn = service->GetConnection(src_addr, src_port);
-      if (conn) {
-        if (conn->state_ == TcpConnectionState::SYN_SENT) {
-          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
+    auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
+    auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
+    auto payload_size = total_bytes_used - payload_offset;
 
-          // TODO: validate ack num accuracy
-          if (ack_num <= conn->GetInitialSequenceNumber()) {
-            co_return TcpStackState::ERR_ARGUMENT;
-          }
+    PacketContainer payload_packets;
+    // TODO: process the case partial payload in header packet
+    auto pit = std::begin(packets);
+    if (pit != std::end(packets)) {
+      // skip header
+      std::advance(pit, 1);
+    }
 
-          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
-          conn->SetRemoteInitialSequenceNumber(seq_num);
-
-          try {
-            // FIXME: check seq and ack number here
-            co_await conn->AsyncSendReply(TcpPacketType::ACK, seq_num + 1,
-                                          ack_num, 0);
-            conn->state_ = TcpConnectionState::ESTABLISHED;
-            conn->FreshActivity();
-            conn->Established(ack_num + 1, seq_num + 1);
-          }
-          catch (...) {
-            co_return TcpStackState::DROP;
-          }
-          co_return TcpStackState::SUCCESS;
-        } else {
-          co_return TcpStackState::ERR_ARGUMENT;
-        }
-      }
-
-      // We don't have such connection
-      co_return TcpStackState::ERR_ARGUMENT;
-    } else if (tcp_flags == 0x11) {
-      // FIN-ACK
-      auto conn = service->GetConnection(src_addr, src_port);
-      if (conn) {
-        if (conn->state_ == TcpConnectionState::ESTABLISHED) {
-          conn->state_ = TcpConnectionState::CLOSE_WAIT;
-          // TODO
-          co_return TcpStackState::SUCCESS;
-        } else {
-          co_return TcpStackState::ERR_ARGUMENT;
-        }
-      }
-      co_return TcpStackState::ERR_ARGUMENT;
-    } else if (tcp_flags == 0x10) {
-      // ACK
-      auto conn = service->GetConnection(src_addr, src_port);
-      if (conn) {
-        if (conn->state_ == TcpConnectionState::SYN_SENT) {
-          // wrong flag, should be SYN-ACK
-          co_return TcpStackState::ERR_ARGUMENT;
-        } else if (conn->state_ == TcpConnectionState::SYN_RECEIVED) {
-          conn->state_ = TcpConnectionState::ESTABLISHED;
-          conn->FreshActivity();
-
-          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
-          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
-          // TODO: validate seq_num and ack_num
-          // seq_num should be remote ISN + 1
-          // ack_num should be local ISN + 1
-
-          conn->Established(ack_num, seq_num);
-          // jump out state check
-        } else if (conn->state_ == TcpConnectionState::ESTABLISHED) {
-          // jump out state check
-        } else {
-          co_return TcpStackState::ERR_ARGUMENT;
-        }
-
-        auto payload_size = total_bytes_used - payload_offset;
-        if (payload_size) {
-          constexpr bool kAcceptedPackets = std::remove_reference_t<decltype(
-              *conn)>::IsNetPacketContainer();
-
-          if constexpr (!kAcceptedPackets) {
-            static_assert(std::is_same_v<typename std::remove_reference_t<
-                                             decltype(*conn)>::PayloadWrapType,
-                                         typename std::remove_reference_t<
-                                             PacketContainer>::value_type>,
-                          "mismatch type for payload packet");
-          }
-
-          typename std::remove_reference_t<decltype(*conn)>::PayloadWrapType
-              payload_packets;
-
-          // TODO: process the case partial payload in header packet
-          auto pit = std::begin(packets);
-          if (pit != std::end(packets))
-            std::advance(pit, 1); // skip header
-
-          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
-          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
-
-          conn->SetPacketSeqAck(get_packet_ref(*pit), seq_num, ack_num);
-
-          if constexpr (kAcceptedPackets) {
-            for (; pit != std::end(packets); std::advance(pit, 1)) {
-              payload_packets.push_back(*pit);
-            }
-          } else {
-            packet = get_packet_ref(*pit);
-            if (payload_size > packet.GetUsedBytes())
-              throw std::logic_error("We would lose payload here");
-
-            if constexpr (requires { (*pit)->GetUsedBytes(); }) {
-              payload_packets.swap(*pit);
+    // helper: move a range [first, last) into dest preserving order.
+    auto append_move
+        = [&]<typename It>(PacketContainer &dest, It first, It last) {
+            using DC = std::remove_cvref_t<PacketContainer>;
+            if constexpr (requires(DC & c) { c.before_begin(); }) {
+              // forward_list-like: use insert_after to preserve order
+              auto pos = dest.before_begin();
+              // advance pos to the last element (so insert_after appends)
+              for (auto it = dest.begin(); it != dest.end(); ++it)
+                ++pos;
+              for (auto it = first; it != last; ++it) {
+                pos = dest.insert_after(pos, std::move(*it));
+              }
             } else {
-              static_assert(false, "Unsupported packet container");
+              // general sequence containers: move-insert at end
+              std::copy(std::make_move_iterator(first),
+                        std::make_move_iterator(last),
+                        std::inserter(dest, dest.end()));
             }
-          }
+          };
 
-          conn->submitRxChann(std::move(payload_packets));
-        } else {
-          auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
-          auto ack_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 8));
+    if (payload_size == 0) {
+      co_return co_await service->HandleTcpLogic(
+          src_addr, src_port, tcp_flags, seq_num, ack_num,
+          std::move(payload_packets), payload_size);
+    }
 
-          conn->SetPacketSeqAck(packet, seq_num, ack_num);
-        }
-
-        co_return TcpStackState::SUCCESS;
-      } else {
-        co_return TcpStackState::ERR_ARGUMENT;
-      }
-    } else if (tcp_flags == 0x02) {
-      // SYN
-      auto conn = service->AddConnection(src_addr, src_port);
-      if (conn->state_ != TcpConnectionState::LISTEN) {
-        // TODO: reset existed connection
-        co_return TcpStackState::SUCCESS;
-      }
-
-      conn->state_ = TcpConnectionState::SYN_RECEIVED;
-
-      auto seq_num = ntohl(*reinterpret_cast<const uint32_t *>(tcp + 4));
-      conn->SetRemoteInitialSequenceNumber(seq_num);
-
-      auto ack_num = seq_num + 1;
-
-      // Generate ISN
-      seq_num = GenerateInitialSequenceNumber<AddrType>(dst_addr, dst_port,
-                                                        src_addr, src_port);
-
-      try {
-        co_await conn->AsyncSendReply(TcpPacketType::SYN_ACK, seq_num, ack_num,
-                                      0);
-        conn->FreshActivity();
-      }
-      catch (...) {
-        co_return TcpStackState::DROP;
-      }
-      co_return TcpStackState::SUCCESS;
+    auto remaining = std::distance(pit, std::end(packets));
+    if (remaining <= 0) {
+      co_return co_await service->HandleTcpLogic(
+          src_addr, src_port, tcp_flags, seq_num, ack_num,
+          std::move(payload_packets), payload_size);
+    } else if (remaining == 1) {
+      // single-packet payload: keep original single-packet path
+      co_return co_await service->HandleTcpLogic(
+          src_addr, src_port, tcp_flags, seq_num, ack_num, std::move(*pit),
+          payload_size);
     } else {
-      co_return TcpStackState::DROP;
+      // multiple-packet payload: move all remaining packets into
+      // payload_packets
+      append_move(payload_packets, pit, std::end(packets));
+      co_return co_await service->HandleTcpLogic(
+          src_addr, src_port, tcp_flags, seq_num, ack_num,
+          std::move(payload_packets), payload_size);
     }
   }
 };

@@ -17,9 +17,13 @@ extern "C"
 #include <cstdint>
 #include <cstring>
 #include <forward_list>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <random>
+#include <ranges>
+#include <type_traits>
+#include <utility>
 
 #if PARALLEL
 #include <execution>
@@ -700,6 +704,193 @@ protected:
   std::forward_list<std::shared_ptr<TcpConnectionT> > connections_list_;
 
 public:
+  template <NetPacketWrapper PacketContainer>
+  asio::awaitable<TcpStackState>
+  HandleTcpLogic(const AddrType &src_addr, uint_fast16_t src_port,
+                 uint8_t tcp_flags, uint32_t seq_num, uint32_t ack_seq,
+                 PacketContainer &&packets, std::size_t payload_size)
+  {
+    auto get_packet_ref = []<typename P>(P &&packet_like) -> NetPacket & {
+      if constexpr (requires { packet_like->GetUsedBytes(); }) {
+        return *packet_like; // It's a smart pointer
+      } else {
+        return packet_like; // It's a value
+      }
+    };
+
+    if (tcp_flags == 0x12) {
+      // SYN-ACK
+      auto conn = this->GetConnection(src_addr, src_port);
+      if (conn) {
+        if (conn->state_ == netio::TcpConnectionState::SYN_SENT) {
+          // TODO: validate ack num accuracy
+          auto seq = conn->GetInitialSequenceNumber();
+          if (ack_seq <= seq) {
+            co_return netio::TcpStackState::ERR_ARGUMENT;
+          }
+
+          conn->SetRemoteInitialSequenceNumber(seq_num);
+
+          try {
+            co_await conn->AsyncSendReply(netio::TcpPacketType::ACK,
+                                          ack_seq + 1, seq_num, 0);
+            conn->state_ = netio::TcpConnectionState::ESTABLISHED;
+            conn->FreshActivity();
+            conn->Established(ack_seq + 1, seq_num);
+          }
+          catch (...) {
+            co_return netio::TcpStackState::DROP;
+          }
+          co_return netio::TcpStackState::SUCCESS;
+        } else {
+          co_return netio::TcpStackState::ERR_ARGUMENT;
+        }
+      }
+
+      // We don't have such connection
+      co_return netio::TcpStackState::ERR_ARGUMENT;
+    } else if (tcp_flags == 0x11) {
+      // FIN-ACK
+      auto conn = this->GetConnection(src_addr, src_port);
+      if (conn) {
+        if (conn->state_ == netio::TcpConnectionState::ESTABLISHED) {
+          conn->state_ = netio::TcpConnectionState::CLOSE_WAIT;
+          // TODO
+          co_return netio::TcpStackState::SUCCESS;
+        } else {
+          co_return netio::TcpStackState::ERR_ARGUMENT;
+        }
+      }
+      co_return netio::TcpStackState::ERR_ARGUMENT;
+    } else if (tcp_flags == 0x10) {
+      // ACK
+      auto conn = this->GetConnection(src_addr, src_port);
+      if (conn) {
+        if (conn->state_ == netio::TcpConnectionState::SYN_SENT) {
+          // wrong flag, should be SYN-ACK
+          co_return netio::TcpStackState::ERR_ARGUMENT;
+        } else if (conn->state_ == netio::TcpConnectionState::SYN_RECEIVED) {
+          conn->state_ = netio::TcpConnectionState::ESTABLISHED;
+          conn->FreshActivity();
+
+          // TODO: validate seq_num and ack_num
+          // seq_num should be remote ISN + 1
+          // ack_num should be local ISN + 1
+
+          conn->Established(ack_seq, seq_num);
+          // jump out state check
+        } else if (conn->state_ == netio::TcpConnectionState::ESTABLISHED) {
+          // jump out state check
+        } else {
+          co_return netio::TcpStackState::ERR_ARGUMENT;
+        }
+
+        if (payload_size) {
+          constexpr bool kAcceptedPackets = std::remove_reference_t<decltype(
+              *conn)>::IsNetPacketContainer();
+
+          if constexpr (!kAcceptedPackets) {
+            // determine the "element" type the caller passed:
+            using RawPktCont = std::remove_reference_t<PacketContainer>;
+            // Container case: deduce element type from *begin()
+            if constexpr (std::ranges::range<RawPktCont>) {
+              using PacketElementType = std::remove_cvref_t<decltype(
+                  *std::begin(std::declval<RawPktCont &>()))>;
+
+              using ConnPayloadType =
+                  typename std::remove_reference_t<decltype(
+                      *conn)>::PayloadWrapType;
+
+              static_assert(std::is_same_v<ConnPayloadType, PacketElementType>,
+                            "mismatch type for payload packet");
+            } else {
+              // Single-packet case: treat PacketContainer as the element type
+              using PacketElementType = RawPktCont;
+
+              using ConnPayloadType =
+                  typename std::remove_reference_t<decltype(
+                      *conn)>::PayloadWrapType;
+
+              static_assert(std::is_same_v<ConnPayloadType, PacketElementType>,
+                            "mismatch type for payload packet");
+            }
+          }
+
+          typename std::remove_reference_t<decltype(*conn)>::PayloadWrapType
+              payload_packets;
+
+          if constexpr (NetPacketContainer<PacketContainer>) {
+            auto pit = std::begin(packets);
+            conn->SetPacketSeqAck(get_packet_ref(*pit), seq_num, ack_seq);
+
+            if constexpr (kAcceptedPackets) {
+              for (; pit != std::end(packets); std::advance(pit, 1)) {
+                payload_packets.push_back(*pit);
+              }
+            } else {
+              auto &packet = get_packet_ref(*pit);
+              if (payload_size > packet.GetUsedBytes())
+                throw std::logic_error("We would lose payload here");
+
+              if constexpr (requires { (*pit)->GetUsedBytes(); }) {
+                payload_packets.swap(*pit);
+              } else {
+                static_assert(false, "Unsupported packet container");
+              }
+            }
+          } else {
+            auto &packet = get_packet_ref(packets);
+            conn->SetPacketSeqAck(packet, seq_num, ack_seq);
+            if constexpr (kAcceptedPackets) {
+              payload_packets.push_back(packet);
+            } else {
+              payload_packets.swap(packets);
+            }
+          }
+
+          conn->submitRxChann(std::move(payload_packets));
+        } else {
+          // We can't update packet record here, it may not exist
+        }
+
+        co_return netio::TcpStackState::SUCCESS;
+      } else {
+        co_return netio::TcpStackState::ERR_ARGUMENT;
+      }
+    } else if (tcp_flags == 0x02) {
+      // SYN
+      auto conn = this->AddConnection(src_addr, src_port);
+      if (conn->state_ != netio::TcpConnectionState::LISTEN) {
+        // TODO: reset existed connection
+        co_return netio::TcpStackState::SUCCESS;
+      }
+
+      conn->state_ = netio::TcpConnectionState::SYN_RECEIVED;
+
+      conn->SetRemoteInitialSequenceNumber(seq_num);
+
+      auto ack_num = seq_num + 1;
+
+      auto &local_addr = this->GetLocalAddr();
+      auto local_port = this->GetPort();
+      // Generate ISN
+      auto seq_num = netio::GenerateInitialSequenceNumber(
+          local_addr, local_port, src_addr, src_port);
+
+      try {
+        co_await conn->AsyncSendReply(netio::TcpPacketType::SYN_ACK, seq_num,
+                                      ack_num, 0);
+        conn->FreshActivity();
+      }
+      catch (...) {
+        co_return netio::TcpStackState::DROP;
+      }
+      co_return netio::TcpStackState::SUCCESS;
+    } else {
+      co_return netio::TcpStackState::DROP;
+    }
+  }
+
   TcpService(TcpConnFactory &&conn_factory, const AddrType &addr,
              uint_fast16_t port) noexcept
       : local_addr_(addr),
