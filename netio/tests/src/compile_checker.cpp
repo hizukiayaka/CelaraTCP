@@ -203,8 +203,6 @@ main(int argc, char *argv[])
 {
   asio::io_context ioc;
 
-  auto stream = std::make_shared<asio::posix::stream_descriptor>(ioc);
-
   memmanager::SimpleHeapAllocator<NetMemChunk> alloc(kIpv4HdrSize);
   auto hdr_pool = std::make_shared<recycle::shared_pool<NetMemChunk> >(
       [&alloc]() { return alloc.Allocation(); });
@@ -214,6 +212,9 @@ main(int argc, char *argv[])
   auto e_net = std::make_shared<netdev::EthernetNetdev>("eth0");
 
   asio::any_io_executor ex = ioc.get_executor();
+
+  auto ipv6_raw_socket = std::make_shared<netio::RawIpv6Socket>(ex);
+
   auto conn_factory = [&ex, &e_net,
                        &hdr_pool](const asio::ip::address_v4 &local_addr,
                                   uint_fast16_t local_port,
