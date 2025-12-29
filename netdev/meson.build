@@ -67,13 +67,30 @@ else
   netdev_cpp_args += '-DHAVE_INT128=0'
 endif
 
-netdev = library('netdev',
+netdev_name = celaratcp_lib_prefix + 'netdev'
+netdev = library(netdev_name,
     netdev_sources,
     include_directories: [netdev_inc, common_inc],
     dependencies: netdev_internal_dep,
     cpp_args: netdev_cpp_args,
-    sources: netdev_ebpf_skeletons  # Ensure skeletons are generated first
+    sources: netdev_ebpf_skeletons,  # Ensure skeletons are generated first
+    install: true,
+    version: meson.project_version()
 )
+
+install_headers(
+    'inc/bpf_ringbuf.hpp',
+    'inc/bpf_tcp_ringbuf.hpp',
+    'inc/ebpf_tcp_service.hpp',
+    'inc/ethernet_netdev.hpp',
+    'inc/net_filter_inf.hpp',
+    'inc/physical_netdev_base.hpp',
+    'inc/tun_gnu_linux_impl.hpp',
+    'inc/virtual_netdev_base.hpp',
+    'inc/virtual_netdev.hpp',
+    subdir: meson.project_name())
+
+pkg.generate(netdev)
 
 netdev_dep = declare_dependency(link_with: netdev,
     include_directories: [netdev_inc]

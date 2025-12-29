@@ -1,7 +1,7 @@
 project(
     'celaratcp',
     'cpp',
-    version: '0.0.9',
+    version: '0.1.0',
     license: 'AGPL-3.0-or-later',
     meson_version: '>=1.2.0',
     default_options : [
@@ -20,6 +20,9 @@ if spdlog_dep.found()
 endif
 
 add_project_arguments('-fcoroutines', language: ['cpp'])
+
+celaratcp_lib_prefix = 'celtcp_'
+pkg = import('pkgconfig')
 
 subdir('contrib')
 subdir('common')
