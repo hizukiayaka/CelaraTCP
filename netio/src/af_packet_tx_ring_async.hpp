@@ -506,8 +506,8 @@ public:
       : pool_(std::make_shared<impl>(std::move(ex), socket_fd, ring_buf,
                                      frame_size, block_size, ether_hdr))
   {
-    static_assert(std::is_base_of_v<NetMemChunk, Value>,
-                  "Value must derive from NetMemChunk");
+    static_assert(NetMemChunkLike<Value>,
+                  "Value must derive from NetMemChunkT with any meta type");
 
     netio::logging::trace("Start AF_PACKET SOCK_RAW service for socket {}",
                           socket_fd);
@@ -522,8 +522,8 @@ public:
                                      frame_size, block_size,
                                      std::move(endpoint)))
   {
-    static_assert(std::is_base_of_v<NetMemChunk, Value>,
-                  "Value must derive from NetMemChunk");
+    static_assert(NetMemChunkLike<Value>,
+                  "Value must derive from NetMemChunkT with any meta type");
 
     netio::logging::trace("Start AF_PACKET SOCK_DGRAM service for socket {}",
                           socket_fd);
