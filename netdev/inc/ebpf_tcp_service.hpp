@@ -19,14 +19,18 @@ class TcpService : public netio::TcpService<AddrType, TcpConnFactory>
 protected:
   netdev::IPacketFilter *filter_;
 
+  template <typename>
+  static constexpr bool kAlwaysFalse = false;
+
+  template <NetMemChunkLike PacketT>
   asio::awaitable<netio::TcpStackState>
   ProcessParsedPacket(ebpf::BpfRingbufTcpMeta *meta,
-                      std::shared_ptr<NetMemChunk> packet)
+                      std::shared_ptr<PacketT> packet)
   {
     const auto tcp_flags = meta->tcp_flags_;
     const auto src_port = meta->src_port_;
-    const auto seq_num = meta->seq_num_;
-    const auto ack_seq = meta->ack_num_;
+    const auto peer_seq = meta->seq_num;
+    const auto peer_ack = meta->ack_num;
 
     auto src_addr = [](auto &addr) -> const AddrType {
       if constexpr (std::is_same_v<AddrType, asio::ip::address_v4>) {
@@ -36,16 +40,11 @@ protected:
       }
     }(meta->addr_);
 
-    std::vector<std::shared_ptr<NetMemChunk> > payload_packets;
-    std::size_t payload_size = 0;
-    if (packet) {
-      payload_size = packet->GetUsedBytes();
-      payload_packets.push_back(std::move(packet));
-    }
+    std::size_t payload_size = packet ? packet->GetUsedBytes() : 0;
 
-    co_return co_await this->HandleTcpLogic(
-        src_addr, src_port, tcp_flags, seq_num, ack_seq,
-        std::move(payload_packets), payload_size);
+    co_return co_await this->HandleTcpLogic(src_addr, src_port, tcp_flags,
+                                            peer_seq, peer_ack,
+                                            std::move(packet), payload_size);
   }
 
 public:

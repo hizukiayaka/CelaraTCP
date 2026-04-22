@@ -40,8 +40,8 @@ template <typename T>
 class EbpfRingbufAllocator
     : public std::enable_shared_from_this<EbpfRingbufAllocator<T> >
 {
-  static_assert(std::is_base_of_v<NetMemChunk, T>,
-                "Allocator is for NetMemChunk types");
+  static_assert(NetMemChunkLike<T>,
+                "Allocator is for NetMemChunkT-based packet types");
 
 private:
   asio::any_io_executor ex_;
