@@ -7,7 +7,10 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <span>
+#include <type_traits>
+#include <utility>
 
 #include <asio/buffer.hpp>
 
@@ -20,20 +23,90 @@ constexpr uint_fast16_t kTcpHdrMinimalSize = 20;
 constexpr uint_fast16_t kUdpHdrSize = 8;
 constexpr uint_fast16_t kUdp6Payload = kRegularMtu - kIpv6HdrSize - 8;
 
-class NetPacket
+struct NoneMeta
+{
+};
+
+struct TcpSeqMeta
+{
+  uint_fast32_t seq_num{ 0 };
+  uint_fast32_t ack_num{ 0 };
+};
+
+template <typename MetaT = TcpSeqMeta>
+class NetPacketMeta
+{
+public:
+  using meta_type = MetaT;
+  using meta_ptr = std::unique_ptr<MetaT>;
+
+protected:
+  meta_ptr meta_;
+
+  static meta_ptr
+  MakeDefaultMeta()
+  {
+    if constexpr (std::is_default_constructible_v<MetaT>) {
+      return std::make_unique<MetaT>();
+    }
+
+    return nullptr;
+  }
+
+public:
+  NetPacketMeta() : meta_(MakeDefaultMeta()) {}
+
+  explicit NetPacketMeta(meta_ptr meta) : meta_(std::move(meta)) {}
+
+  void
+  SetMeta(meta_ptr meta)
+  {
+    meta_ = std::move(meta);
+  }
+
+  MetaT *
+  GetMeta()
+  {
+    return meta_.get();
+  }
+
+  const MetaT *
+  GetMeta() const
+  {
+    return meta_.get();
+  }
+};
+
+template <class P, class = void>
+struct packet_meta
+{
+  using type = celaratcp::NoneMeta;
+  static constexpr bool has_meta = false;
+};
+
+template <class P>
+struct packet_meta<P, std::void_t<typename std::remove_cvref_t<P>::meta_type> >
+{
+  using type = typename std::remove_cvref_t<P>::meta_type;
+  static constexpr bool has_meta = true;
+};
+
+template <class P>
+using packet_meta_t = typename packet_meta<P>::type;
+
+// Non-template abstract base for polymorphic packet pointers
+class NetPacketBase
 {
 protected:
   uint_fast16_t used_bytes{ 0 };
 
 public:
-  class MetaData
-  {
-  public:
-    std::array<uint32_t, 4> data{ 0 };
-  } meta;
-
-  NetPacket() = default;
-  virtual ~NetPacket() = default;
+  NetPacketBase() = default;
+  virtual ~NetPacketBase() = default;
+  NetPacketBase(const NetPacketBase &) = default;
+  NetPacketBase &operator=(const NetPacketBase &) = default;
+  NetPacketBase(NetPacketBase &&) = default;
+  NetPacketBase &operator=(NetPacketBase &&) = default;
 
   virtual asio::const_buffer GetConstBuf() = 0;
 
@@ -57,7 +130,33 @@ public:
   }
 };
 
-// Concept for containers holding items derived from NetPacket
+template <typename MetaT = NoneMeta>
+class NetPacketT : public NetPacketBase, public NetPacketMeta<MetaT>
+{
+public:
+  NetPacketT() = default;
+  NetPacketT(const NetPacketT &) = delete;
+  NetPacketT &operator=(const NetPacketT &) = delete;
+  NetPacketT(NetPacketT &&) = default;
+  NetPacketT &operator=(NetPacketT &&) = default;
+
+  explicit NetPacketT(typename NetPacketMeta<MetaT>::meta_ptr meta)
+      : NetPacketMeta<MetaT>(std::move(meta))
+  {
+  }
+};
+
+using NetPacket = NetPacketBase;
+
+template <typename T>
+concept NetPacketLike
+    = (requires { typename std::remove_cvref_t<T>::meta_type; }
+       && std::is_base_of_v<
+           NetPacketT<typename std::remove_cvref_t<T>::meta_type>,
+           std::remove_cvref_t<T> >)
+      || std::is_base_of_v<NetPacketBase, std::remove_cvref_t<T> >;
+
+// Concept for containers holding items derived from NetPacketBase
 template <typename T>
 concept NetPacketContainer = requires(T t)
 {
@@ -69,22 +168,23 @@ concept NetPacketContainer = requires(T t)
 &&(requires {
   typename std::remove_reference_t<T>::value_type;
   requires std::is_base_of_v<
-      NetPacket, typename std::pointer_traits<typename std::remove_reference_t<
-                     T>::value_type>::element_type>;
+      NetPacketBase,
+      typename std::pointer_traits<
+          typename std::remove_reference_t<T>::value_type>::element_type>;
 });
 
 template <typename T>
 concept NetPacketWrapper
     = NetPacketContainer<T> ||
-      // Case 2: T is a smart pointer to a type derived from NetPacket
+      // Case 2: T is a smart pointer to a type derived from NetPacketBase
       (requires {
         requires std::is_base_of_v<
-            NetPacket, typename std::pointer_traits<
-                           std::remove_reference_t<T> >::element_type>;
+            NetPacketBase, typename std::pointer_traits<
+                               std::remove_reference_t<T> >::element_type>;
       });
 
 template <std::size_t... Ns>
-class NetPacketSW : public NetPacket
+class NetPacketSW : public NetPacketT<TcpSeqMeta>
 {
 private:
   static constexpr std::size_t kTotalSize = (Ns + ...);
@@ -146,34 +246,53 @@ using Ipv6TcpHdrPacket = NetPacketSW<kIpv6HdrSize, kTcpHdrMinimalSize>;
 using Ipv4UdpHdrPacket = NetPacketSW<kIpv4HdrSize, kUdpHdrSize>;
 using Ipv6UdpHdrPacket = NetPacketSW<kIpv6HdrSize, kUdpHdrSize>;
 
-class NetMemChunk : public NetPacket
+template <typename MetaT = TcpSeqMeta>
+class NetMemChunkT : public NetPacketT<MetaT>
 {
 protected:
   std::span<uint8_t> chunk_;
 
 public:
   template <typename It>
-  NetMemChunk(It first, std::size_t count) : chunk_(first, count)
+  NetMemChunkT(It first, std::size_t count) : chunk_(first, count)
+  {
+  }
+
+  template <typename It>
+  NetMemChunkT(It first, std::size_t count,
+               typename NetPacketMeta<MetaT>::meta_ptr meta)
+      : NetPacketT<MetaT>(std::move(meta)), chunk_(first, count)
   {
   }
 
   template <typename It, typename End>
-  NetMemChunk(It first, End last) : chunk_(first, last)
+  NetMemChunkT(It first, End last) : chunk_(first, last)
+  {
+  }
+
+  template <typename It, typename End>
+  NetMemChunkT(It first, End last,
+               typename NetPacketMeta<MetaT>::meta_ptr meta)
+      : NetPacketT<MetaT>(std::move(meta)), chunk_(first, last)
   {
   }
 
   template <typename Container>
-  NetMemChunk(Container &cont)
+  NetMemChunkT(Container &cont)
       : chunk_(reinterpret_cast<uint8_t *>(std::data(cont)), std::size(cont))
   {
   }
 
-  virtual ~NetMemChunk() = default;
+  virtual ~NetMemChunkT() = default;
+  NetMemChunkT(const NetMemChunkT &) = delete;
+  NetMemChunkT &operator=(const NetMemChunkT &) = delete;
+  NetMemChunkT(NetMemChunkT &&) = default;
+  NetMemChunkT &operator=(NetMemChunkT &&) = default;
 
   virtual asio::const_buffer
   GetConstBuf() override
   {
-    return asio::buffer(chunk_.data(), used_bytes);
+    return asio::buffer(chunk_.data(), this->used_bytes);
   }
 
   virtual asio::mutable_buffer
@@ -182,7 +301,7 @@ public:
     return asio::buffer(chunk_.data(), chunk_.size_bytes());
   }
 
-  virtual constexpr std::size_t
+  virtual std::size_t
   GetMaximumSize() override
   {
     return chunk_.size_bytes();
@@ -194,7 +313,7 @@ public:
     if (bytes > chunk_.size_bytes())
       return false;
 
-    used_bytes = bytes;
+    this->used_bytes = bytes;
 
     return true;
   }
@@ -218,30 +337,46 @@ public:
   };
 };
 
-template <typename MetaT>
-class NetMemChunkMeta : public NetMemChunk
+template <typename T>
+concept NetMemChunkLike = requires
 {
-protected:
-  std::unique_ptr<MetaT> meta_;
+  typename std::remove_cvref_t<T>::meta_type;
+}
+&&std::is_base_of_v<NetMemChunkT<typename std::remove_cvref_t<T>::meta_type>,
+                    std::remove_cvref_t<T> >;
 
+using NetMemChunk = NetMemChunkT<>;
+
+template <typename MetaT>
+class NetMemChunkMeta : public NetMemChunkT<MetaT>
+{
 public:
+  NetMemChunkMeta(const NetMemChunkMeta &) = delete;
+  NetMemChunkMeta &operator=(const NetMemChunkMeta &) = delete;
+  NetMemChunkMeta(NetMemChunkMeta &&) = default;
+  NetMemChunkMeta &operator=(NetMemChunkMeta &&) = default;
+
   template <typename It>
-  NetMemChunkMeta(It first, std::size_t count,
-                  std::unique_ptr<MetaT> meta = nullptr)
-      : NetMemChunk(first, count), meta_(std::move(meta))
+  NetMemChunkMeta(It first, std::size_t count)
+      : NetMemChunkT<MetaT>(first, count)
+  {
+  }
+
+  template <typename It>
+  NetMemChunkMeta(It first, std::size_t count, std::unique_ptr<MetaT> meta)
+      : NetMemChunkT<MetaT>(first, count, std::move(meta))
   {
   }
 
   template <typename It, typename End>
-  NetMemChunkMeta(It first, End last, std::unique_ptr<MetaT> meta = nullptr)
-      : NetMemChunk(first, last), meta_(std::move(meta))
+  NetMemChunkMeta(It first, End last) : NetMemChunkT<MetaT>(first, last)
   {
   }
 
-  MetaT *
-  GetMeta()
+  template <typename It, typename End>
+  NetMemChunkMeta(It first, End last, std::unique_ptr<MetaT> meta)
+      : NetMemChunkT<MetaT>(first, last, std::move(meta))
   {
-    return meta_.get();
   }
 };
 

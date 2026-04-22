@@ -24,11 +24,12 @@
 namespace celaratcp {
 namespace memmanager {
 
-template <typename T> class SimpleHeapAllocator
+template <typename T>
+class SimpleHeapAllocator
 {
 private:
-  static_assert(std::is_base_of_v<NetMemChunk, T>,
-                "This allocator is designed for net packet");
+  static_assert(NetMemChunkLike<T>,
+                "This allocator is designed for NetMemChunkT-based packets");
 
   class Impl : public T
   {
@@ -36,9 +37,31 @@ private:
     std::unique_ptr<uint8_t[]> data_;
     std::size_t data_size_;
 
+    template <typename U = T>
+    static U
+    CreatePacket(uint8_t *payload, std::size_t data_size)
+    {
+      if constexpr (requires {
+                      typename U::meta_type;
+                      U(payload, data_size,
+                        std::declval<
+                            std::unique_ptr<typename U::meta_type> >());
+                    })
+      {
+        using M = typename U::meta_type;
+        if constexpr (std::is_default_constructible_v<M>) {
+          return U(payload, data_size, std::make_unique<M>());
+        } else {
+          return U(payload, data_size, std::unique_ptr<M>{});
+        }
+      } else {
+        return U(payload, data_size);
+      }
+    }
+
   public:
     Impl(std::unique_ptr<uint8_t[]> &&payload, std::size_t data_size)
-        : T(payload.get(), data_size), data_(std::move(payload)),
+        : T(CreatePacket(payload.get(), data_size)), data_(std::move(payload)),
           data_size_(data_size)
     {
     }
@@ -52,21 +75,21 @@ public:
   std::shared_ptr<T>
   Allocation()
   {
-    std::unique_ptr<uint8_t[]> payload
-        = std::make_unique_for_overwrite<uint8_t[]>(buf_size_);
+    auto payload = std::make_unique<uint8_t[]>(buf_size_);
     auto wrap = std::make_shared<Impl>(std::move(payload), buf_size_);
-    return static_cast<std::shared_ptr<T> >(wrap);
+    return std::static_pointer_cast<T>(wrap);
   }
 
 private:
   const std::size_t buf_size_;
 };
 
-template <typename T> class SimpleVectorAllocator
+template <typename T>
+class SimpleVectorAllocator
 {
 private:
-  static_assert(std::is_base_of_v<NetMemChunk, T>,
-                "This allocator is designed for net packet");
+  static_assert(NetMemChunkLike<T>,
+                "This allocator is designed for NetMemChunkT-based packets");
 
   class Impl : public T
   {
