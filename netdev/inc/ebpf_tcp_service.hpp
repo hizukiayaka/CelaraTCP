@@ -8,6 +8,7 @@
 #include "userspace_tcp_stack.hpp"
 /* This is a local header */
 #include "bpf_tcp_ringbuf.hpp"
+/* include "net_filter_inf.hpp" before this file */
 
 namespace celaratcp {
 namespace ebpf {
