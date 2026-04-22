@@ -18,7 +18,7 @@ extern "C"
 namespace celaratcp {
 namespace ebpf {
 
-class BpfRingbufTcpMeta
+class BpfRingbufTcpMeta : public TcpSeqMeta
 {
 private:
   static asio::ip::address
@@ -48,21 +48,19 @@ private:
 public:
   const asio::ip::address addr_;
   const uint_fast16_t src_port_;
-  const uint_fast32_t seq_num_;
-  const uint_fast32_t ack_num_;
   const uint_fast8_t tcp_flags_;
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
   explicit BpfRingbufTcpMeta(const struct capture_tcp_sample *sample)
-      : addr_(ExtractIpAddr(sample)), src_port_(ntohs(sample->sport)),
-        seq_num_(ntohl(sample->seq)), ack_num_(ntohl(sample->ack_seq)),
+      : TcpSeqMeta{ntohl(sample->seq), ntohl(sample->ack_seq)},
+        addr_(ExtractIpAddr(sample)), src_port_(ntohs(sample->sport)),
         tcp_flags_(static_cast<uint8_t>(sample->DORsFlags >> 8))
   {
   }
 #else
   explicit BpfRingbufTcpMeta(struct capture_tcp_sample *sample)
-      : addr_(ExtractIpAddr(sample)), src_port_(sample->sport),
-        seq_num_(sample->seq), ack_num_(sample->ack_seq),
+      : TcpSeqMeta{sample->seq, sample->ack_seq},
+        addr_(ExtractIpAddr(sample)), src_port_(sample->sport),
         tcp_flags_(static_cast<uint8_t>(sample->DORsFlags & UINT8_MAX))
   {
   }
