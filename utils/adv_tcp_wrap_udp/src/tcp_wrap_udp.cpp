@@ -76,16 +76,23 @@ error(Args &&...)
 template <typename AddrType, typename NetworkDevObjectT,
           netio::CheckSumPolicy Policy = netio::CheckSumPolicy::IP_TCP>
 class TcpUdpSession
-    : public netio::TcpConnection<AddrType, std::shared_ptr<NetMemChunk>,
-                                  Policy>
+    : public netio::TcpConnection<
+          AddrType, std::shared_ptr<ebpf::BpfRingbufTcpPacket>, Policy>
 {
 private:
+  uint_fast32_t local_seq_;
+  uint_fast32_t peer_seq_;
+
   asio::awaitable<void>
   tcp_receiver()
   {
     for (;;) {
       auto pkt = co_await this->fetchPackets();
       auto buf = pkt->GetConstBuf();
+
+      if (auto *m = pkt->GetMeta()) {
+        peer_seq_ = m->seq_num;
+      }
 
       asio::error_code ec;
 
@@ -150,6 +157,11 @@ private:
         co_return;
       }
 
+      if (auto *m = pkt->GetMeta()) {
+        m->seq_num = local_seq_++;
+        m->ack_num = peer_seq_;
+      }
+
       this->AssemblePacketHeaders(netio::TcpPacketType::ACK, pkt);
 
       // We just call network stream object to handle, TcpStack should have
@@ -171,7 +183,8 @@ public:
                          uint_fast16_t remote_port, asio::any_io_executor &ex,
                          std::shared_ptr<NetworkDevObjectT> net_dev,
                          uint_fast16_t udp_port)
-      : netio::TcpConnection<AddrType, std::shared_ptr<NetMemChunk>, Policy>(
+      : netio::TcpConnection<
+            AddrType, std::shared_ptr<ebpf::BpfRingbufTcpPacket>, Policy>(
             local_addr, local_port, remote_addr, remote_port, ex),
         ex_(ex), strand_(ex_), net_dev_(std::move(net_dev)),
         nout_socket_{ std::make_unique<netio::PacketSocketLinux>(
@@ -192,23 +205,23 @@ public:
 
   ~TcpUdpSession() {}
 
-  virtual void
-  Established(uint_fast32_t cur_seq_num, uint_fast32_t cur_ack_num) override
+  void
+  Established(uint_fast32_t local_seq, uint_fast32_t peer_seq) override
   {
     asio::ip::udp::endpoint dest(asio::ip::make_address_v6("::1"), udp_port_);
 
     udp_socket_.open(asio::ip::udp::v6());
     udp_socket_.connect(dest);
 
+    local_seq_ = local_seq;
+    peer_seq_ = peer_seq;
+
     asio::co_spawn(ex_, tcp_receiver(), asio::detached);
     asio::co_spawn(ex_, udp_receiver(), asio::detached);
     asio::co_spawn(ex_, udp_forward_tcp(), asio::detached);
-
-    (void)cur_seq_num;
-    (void)cur_ack_num;
   }
 
-  virtual asio::awaitable<void>
+  asio::awaitable<void>
   AsyncSendReply(netio::TcpPacketType packet_type, uint_fast32_t seq,
                  uint_fast32_t ack, uint_fast32_t ttl) override
   {
@@ -217,8 +230,13 @@ public:
       app::logging::error("can't allocate packet for reply");
       co_return;
     }
+    auto m = reply->GetMeta();
+    if (m) {
+      m->seq_num = seq;
+      m->ack_num = ack;
+    }
 
-    this->AssemblePacketHeaders(packet_type, reply, seq, ack, ttl);
+    this->AssemblePacketHeaders(packet_type, reply, ttl);
     co_return;
   }
 

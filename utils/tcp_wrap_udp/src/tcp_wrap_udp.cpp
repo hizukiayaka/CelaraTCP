@@ -13,6 +13,8 @@ class TcpUdpSession
 {
 private:
   using pool_t = recycle::shared_pool<NetMemChunk>;
+  uint_fast32_t seq_;
+  uint_fast32_t received_remote_seq_;
 
   asio::awaitable<void>
   tcp_receiver()
@@ -20,6 +22,10 @@ private:
     for (;;) {
       auto pkt = co_await this->fetchPackets();
       auto buf = pkt->GetConstBuf();
+
+      if (auto *m = pkt->GetMeta()) {
+        received_remote_seq_ = m->seq_num;
+      }
 
       asio::error_code ec;
       co_await udp_socket_.async_send(
@@ -60,6 +66,11 @@ private:
       auto hdr = hdr_pool->allocate();
 
       std::forward_list<std::shared_ptr<NetPacket> > pkts = { hdr, pkt };
+
+      if (auto *m = hdr->GetMeta()) {
+        m->seq_num = seq_++;
+        m->ack_num = received_remote_seq_;
+      }
 
       this->AssemblePacketHeaders(TcpPacketType::ACK, pkts);
 
@@ -108,8 +119,8 @@ public:
 #endif
   }
 
-  virtual void
-  Established(uint_fast32_t cur_seq_num, uint_fast32_t cur_ack_num) override
+  void
+  Established(uint_fast32_t seq_num, uint_fast32_t cur_remote_seq) override
   {
     asio::ip::udp::endpoint dest(asio::ip::make_address_v6("::1"), udp_port_);
 
@@ -121,16 +132,22 @@ public:
     asio::co_spawn(ex_, udp_forward_tcp(tcp_hdr_pool_, chan_tx_),
                    asio::detached);
 
-    (void)cur_seq_num;
-    (void)cur_ack_num;
+    seq_ = seq_num;
+    received_remote_seq_ = cur_remote_seq;
   }
 
-  virtual asio::awaitable<void>
+  asio::awaitable<void>
   AsyncSendReply(TcpPacketType packet_type, uint_fast32_t seq,
                  uint_fast32_t ack, uint_fast32_t ttl) override
   {
     auto reply = tcp_hdr_pool_->allocate();
-    this->AssemblePacketHeaders(packet_type, reply, seq, ack, ttl);
+
+    if (auto *m = reply->GetMeta()) {
+      m->seq_num = seq;
+      m->ack_num = ack;
+    }
+
+    this->AssemblePacketHeaders(packet_type, reply, ttl);
     co_await asio::async_write(*nout_, reply->GetConstBuf(),
                                asio::use_awaitable);
   }
