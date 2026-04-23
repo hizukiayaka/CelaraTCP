@@ -148,7 +148,7 @@ public:
   {
   }
 
-  virtual std::size_t
+  std::size_t
   SendReply(netio::TcpPacketType, uint_fast32_t, uint_fast32_t,
             uint_fast32_t) override
   {
@@ -186,7 +186,7 @@ public:
   {
   }
 
-  virtual asio::awaitable<void>
+  asio::awaitable<void>
   AsyncSendReply(netio::TcpPacketType, uint_fast32_t, uint_fast32_t,
                  uint_fast32_t) override
   {
