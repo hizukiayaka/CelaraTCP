@@ -387,10 +387,10 @@ protected:
   }
 
   // We don't handle the checksum here
-  virtual bool
-  FillIpTcpHdr(TcpPacketType packet_type, NetPacket &packet,
-               std::size_t payload_size, uint_fast32_t seq, uint_fast32_t ack,
-               uint_fast32_t ttl)
+  template <NetPacketLike PacketT>
+  bool
+  FillIpTcpHdr(TcpPacketType packet_type, PacketT &packet,
+               std::size_t payload_size, uint_fast32_t ttl)
   {
     std::size_t ip_hdr_size;
     auto hdr = packet.GetData();
@@ -411,10 +411,15 @@ protected:
     std::copy(tcp_hdr_tmpl_.cbegin(), tcp_hdr_tmpl_.cend(), tcp.begin());
     auto data = std::data(tcp);
 
-    // Sequence number
-    *reinterpret_cast<uint32_t *>(data + 4) = htonl(seq);
-    // Acknowledgment number
-    *reinterpret_cast<uint32_t *>(data + 8) = htonl(ack);
+    using Meta = packet_meta_t<PacketT>;
+    if constexpr (std::is_base_of_v<celaratcp::TcpSeqMeta, Meta>) {
+      if (auto *m = packet.GetMeta()) {
+        // Sequence number
+        *reinterpret_cast<uint32_t *>(data + 4) = htonl(m->seq_num);
+        // Acknowledgment number
+        *reinterpret_cast<uint32_t *>(data + 8) = htonl(m->ack_num);
+      }
+    }
 
     switch (packet_type) {
     case TcpPacketType::SYN:
@@ -448,7 +453,6 @@ protected:
    */
   void
   CompleteTcpCheckSum(std::span<uint8_t> tcp, std::size_t payload_size,
-                      uint_fast32_t seq, uint_fast32_t ack,
                       uint_fast32_t payload_sum = 0)
   {
     if (payload_size < kTcpHdrMinimalSize) {
@@ -464,11 +468,9 @@ protected:
     tcp_sum += static_cast<uint16_t>(payload_size);
 
     // NOTE: the left Tcp Segment part here
-    tcp_sum += static_cast<uint16_t>(seq >> 16);
-    tcp_sum += static_cast<uint16_t>(seq & 0xFFFF);
 
-    tcp_sum += static_cast<uint16_t>(ack >> 16);
-    tcp_sum += static_cast<uint16_t>(ack & 0xFFFF);
+    // Sequence + ACK fields are bytes 4..11 in TCP header
+    tcp_sum += InternetSum(tcp.subspan(4, 8));
 
     // TCP Flags
     tcp_sum += tcp[13];
@@ -544,20 +546,33 @@ public:
     return strand_;
   }
 
-  virtual void
-  SetPacketSeqAck(NetPacket &packet, uint_fast32_t seq, uint_fast32_t ack)
+  template <NetPacketLike PacketT>
+  void
+  SetPacketSeqAck(PacketT &packet, uint_fast32_t seq, uint_fast32_t ack)
   {
-    packet.meta.data[0] = seq;
-    packet.meta.data[1] = ack;
+    using Meta = packet_meta_t<PacketT>;
+
+    if constexpr (std::is_base_of_v<celaratcp::TcpSeqMeta, Meta>) {
+      if (auto *m = packet.GetMeta()) {
+        m->seq_num = seq;
+        m->ack_num = ack;
+      }
+    } else {
+      // No-op for other meta types
+      (void)packet;
+      (void)seq;
+      (void)ack;
+    }
   }
 
   /**
    * Handle all the case that IP and TCP headers with or without payload
    * in a single NetPacket.
    */
-  virtual void
-  FillPacketIpTcpHdr(TcpPacketType packet_type, NetPacket &packet,
-                     uint_fast32_t seq, uint_fast32_t ack, uint_fast32_t ttl)
+  template <NetPacketLike PacketT>
+  void
+  FillPacketIpTcpHdr(TcpPacketType packet_type, PacketT &packet,
+                     uint_fast32_t ttl)
   {
     constexpr std::size_t kIpTcpHdrMinimalSize
         = kIPHdrSize + kTcpHdrMinimalSize;
@@ -576,8 +591,7 @@ public:
     else
       payload_size = 0;
 
-    auto success
-        = FillIpTcpHdr(packet_type, packet, payload_size, seq, ack, ttl);
+    auto success = FillIpTcpHdr(packet_type, packet, payload_size, ttl);
     if (!success) {
       throw std::runtime_error("Failed to fill IP and TCP headers");
     }
@@ -591,7 +605,7 @@ public:
       }
       auto ip_payload_size = payload_size + kTcpHdrMinimalSize;
 
-      CompleteTcpCheckSum(tcp, ip_payload_size, seq, ack, payload_sum);
+      CompleteTcpCheckSum(tcp, ip_payload_size, payload_sum);
     }
     packet.SetUsedBytes(kIpTcpHdrMinimalSize + payload_size);
   }
@@ -599,10 +613,9 @@ public:
   template <NetPacketWrapper AnyPacketContainer>
   void
   AssemblePacketHeaders(TcpPacketType packet_type, AnyPacketContainer &packets,
-                        uint_fast32_t seq = 0, uint_fast32_t ack = 0,
                         uint_fast32_t ttl = 0)
   {
-    auto get_packet_ref = []<typename P>(P &&packet_like) -> NetPacket & {
+    auto get_packet_ref = []<typename P>(P &&packet_like) -> decltype(auto) {
       if constexpr (requires { packet_like->GetUsedBytes(); }) {
         return *packet_like; // It's a smart or raw pointer
       } else {
@@ -623,7 +636,7 @@ public:
       if (++next_it == p_end) {
         // single packet case
         auto &packet = get_packet_ref(*p_begin);
-        FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
+        FillPacketIpTcpHdr(packet_type, packet, ttl);
         return;
       }
 
@@ -644,10 +657,10 @@ public:
 
       if (subseq_payload_size > 0) {
         // NOTE: We don't support first packet with payload in this case
-        auto &packet = get_packet_ref(*p_begin);
+        auto &&packet = get_packet_ref(*p_begin);
 
-        auto success = FillIpTcpHdr(packet_type, packet, subseq_payload_size,
-                                    seq, ack, ttl);
+        auto success
+            = FillIpTcpHdr(packet_type, packet, subseq_payload_size, ttl);
         if (!success) {
           throw std::runtime_error("Failed to fill IP and TCP headers");
         }
@@ -657,25 +670,39 @@ public:
               = (packet.GetData()).subspan(kIPHdrSize, kTcpHdrMinimalSize);
 
           CompleteTcpCheckSum(tcp, kTcpHdrMinimalSize + subseq_payload_size,
-                              seq, ack, payload_sum);
+                              payload_sum);
         }
       } else {
         // Only first packet should be available
         auto &packet = get_packet_ref(*p_begin);
 
-        FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
+        FillPacketIpTcpHdr(packet_type, packet, ttl);
       }
     } else {
       // Single packet case - handle both reference and pointer types
       auto &packet = get_packet_ref(packets);
-      FillPacketIpTcpHdr(packet_type, packet, seq, ack, ttl);
+      FillPacketIpTcpHdr(packet_type, packet, ttl);
     }
   }
 
-  virtual void Established(uint_fast32_t cur_seq_num,
-                           uint_fast32_t cur_ack_num)
+  /**
+   * Called when the TCP handshake reaches ESTABLISHED.
+   *
+   * @param local_seq
+   * Client path (we received SYN-ACK and sent ACK):
+   * Server path (we received ACK after sending SYN-ACK):
+   * sequence number we will send for the next ACK packet.
+   *
+   * @param peer_seq
+   * Client path (we received SYN-ACK and sent ACK):
+   * Server path (we received ACK after sending SYN-ACK):
+   * expected sequence number we will receive from the
+   * peer for the next ACK packet.
+   */
+  virtual void Established(uint_fast32_t local_seq, uint_fast32_t peer_seq)
       = 0;
 
+  /* The below two methods are used for handshake only */
   virtual asio::awaitable<void>
   AsyncSendReply(TcpPacketType, uint_fast32_t seq, uint_fast32_t ack,
                  uint_fast32_t ttl)
@@ -685,9 +712,9 @@ public:
   SendReply(TcpPacketType packet_type, uint_fast32_t seq, uint_fast32_t ack,
             uint_fast32_t ttl)
   {
-    // Spawn a coroutine on the connection's strand to run the async operation.
-    // Use asio::use_future to get a future that completes when the coroutine
-    // is done.
+    // Spawn a coroutine on the connection's strand to run the async
+    // operation. Use asio::use_future to get a future that completes when
+    // the coroutine is done.
     std::future<void> f = asio::co_spawn(
         strand_, AsyncSendReply(packet_type, seq, ack, ttl), asio::use_future);
 
