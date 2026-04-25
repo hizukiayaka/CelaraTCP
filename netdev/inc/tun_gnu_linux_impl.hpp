@@ -6,11 +6,13 @@
 #ifndef TUN_GNU_LINUX_IMPL_HPP_
 #define TUN_GNU_LINUX_IMPL_HPP_
 
+#include <experimental/propagate_const>
+#include <string_view>
+#include <variant>
+
 #include <asio/bind_executor.hpp>
 #include <asio/posix/stream_descriptor.hpp>
 #include <asio/strand.hpp>
-#include <experimental/propagate_const>
-#include <string_view>
 
 #include "net_filter_inf.hpp"
 #include "virtual_netdev_base.hpp"
@@ -61,11 +63,20 @@ public:
         b, asio::bind_executor(strand_write_, std::forward<Token>(t)));
   }
 
-  asio::ip::address_v4 GetPeerIPv4Address() const override;
-  asio::ip::address_v6 GetPeerIPv6Address() const override;
+  // Set interface MTU (Maximum Transmission Unit)
+  std::error_code SetMtu(uint_fast16_t mtu) override;
+
+  bool SetLocalAddress(
+      const std::variant<asio::ip::network_v4, asio::ip::network_v6> &network)
+      override;
 
   bool Up() override;
   bool Down() override;
+
+  int GetMtu() const override;
+
+  asio::ip::address_v4 GetPeerIPv4Address() const override;
+  asio::ip::address_v6 GetPeerIPv6Address() const override;
 
   std::list<FilterAttachPoint> GetSupportAttachPoint() const override;
   IPacketFilter *AttachFilter(FilterAttachPoint point) override;

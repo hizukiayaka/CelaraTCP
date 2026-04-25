@@ -61,11 +61,21 @@ public:
     return derived().write_some_impl(b, std::forward<Token>(t));
   }
 
-  virtual asio::ip::address_v4 GetPeerIPv4Address() const = 0;
-  virtual asio::ip::address_v6 GetPeerIPv6Address() const = 0;
+  // Set interface MTU (Maximum Transmission Unit)
+  virtual std::error_code SetMtu(uint_fast16_t mtu) = 0;
+
+  // Set the local address with a prefix
+  virtual bool SetLocalAddress(
+      const std::variant<asio::ip::network_v4, asio::ip::network_v6> &network)
+      = 0;
+
+  virtual int GetMtu() const = 0;
 
   virtual bool Up() = 0;
   virtual bool Down() = 0;
+
+  virtual asio::ip::address_v4 GetPeerIPv4Address() const = 0;
+  virtual asio::ip::address_v6 GetPeerIPv6Address() const = 0;
 };
 
 } // namespace netdev
