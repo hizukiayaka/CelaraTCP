@@ -335,16 +335,31 @@ TunGnuLinuxImpl::TunGnuLinuxImpl(asio::any_io_executor &ex,
   pImpl_->SetPeerIPAddress(addr, peer_addr);
 }
 
-asio::ip::address_v4
-TunGnuLinuxImpl::GetPeerIPv4Address() const
+bool
+TunGnuLinuxImpl::SetLocalAddress(
+    const std::variant<asio::ip::network_v4, asio::ip::network_v6> &network)
 {
-  return pImpl_->GetPeerIPv4Address();
+  return std::visit(
+      [this](auto &&net) {
+        using T = std::decay_t<decltype(net)>;
+        if constexpr (std::is_same_v<T, asio::ip::network_v4>) {
+          // Set IPv4 address
+          return pImpl_->SetLocalIPv4Address(net.address(),
+                                             net.prefix_length());
+        } else if constexpr (std::is_same_v<T, asio::ip::network_v6>) {
+          // Set IPv6 address
+          return pImpl_->SetLocalIPv6Address(net.address(),
+                                             net.prefix_length());
+        }
+        return false;
+      },
+      network);
 }
 
-asio::ip::address_v6
-TunGnuLinuxImpl::GetPeerIPv6Address() const
+std::error_code
+TunGnuLinuxImpl::SetMtu(uint_fast16_t mtu)
 {
-  return pImpl_->GetPeerIPv6Address();
+  return pImpl_->SetMtu(mtu);
 }
 
 bool
@@ -357,6 +372,24 @@ bool
 TunGnuLinuxImpl::Down()
 {
   return pImpl_->Down();
+}
+
+int
+TunGnuLinuxImpl::GetMtu() const
+{
+  return pImpl_->GetMtu();
+}
+
+asio::ip::address_v4
+TunGnuLinuxImpl::GetPeerIPv4Address() const
+{
+  return pImpl_->GetPeerIPv4Address();
+}
+
+asio::ip::address_v6
+TunGnuLinuxImpl::GetPeerIPv6Address() const
+{
+  return pImpl_->GetPeerIPv6Address();
 }
 
 std::list<FilterAttachPoint>
