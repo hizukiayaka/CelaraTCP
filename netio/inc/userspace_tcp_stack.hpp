@@ -319,10 +319,9 @@ protected:
   std::forward_list<std::shared_ptr<TcpServiceT> > services_;
 
 protected:
-  template <
-      typename T = AddrType,
-      typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>, int>
-      = 0>
+  template <typename T = AddrType,
+            typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v4>,
+                                      int> = 0>
   static std::pair<bool, std::size_t>
   ParseIpHeader(NetPacket &packet, std::size_t &packet_length, T &src_addr,
                 T &dst_addr)
@@ -343,10 +342,9 @@ protected:
     return { true, ipHeaderLength };
   }
 
-  template <
-      typename T = AddrType,
-      typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>, int>
-      = 0>
+  template <typename T = AddrType,
+            typename std::enable_if_t<std::is_same_v<T, asio::ip::address_v6>,
+                                      int> = 0>
   static std::pair<bool, std::size_t>
   ParseIpHeader(NetPacket &packet, std::size_t &packet_length, T &src_addr,
                 T &dst_addr)
@@ -444,7 +442,7 @@ protected:
     }
 
     // Stage 2: Switch to stack's strand ONLY to find the service.
-    co_await asio::post(this->strand_, asio::use_awaitable);
+    co_await asio::dispatch(this->strand_, asio::use_awaitable);
 
     auto it = std::find_if(
         this->services_.begin(), this->services_.end(),
@@ -532,7 +530,7 @@ public:
   asio::awaitable<bool>
   AddService(std::shared_ptr<TcpServiceT> service)
   {
-    co_await asio::post(strand_, asio::use_awaitable);
+    co_await asio::dispatch(strand_, asio::use_awaitable);
     auto it = std::find_if(services_.begin(), services_.end(),
                            [service](std::shared_ptr<TcpServiceT> &s) {
                              return s->GetPort() == service->GetPort();
@@ -547,7 +545,7 @@ public:
   asio::awaitable<bool>
   RemoveService(uint_fast16_t port)
   {
-    co_await asio::post(strand_, asio::use_awaitable);
+    co_await asio::dispatch(strand_, asio::use_awaitable);
     auto num_removed
         = services_.remove_if([port](const std::shared_ptr<TcpServiceT> &s) {
             return s->GetPort() == port;
@@ -558,7 +556,7 @@ public:
   asio::awaitable<bool>
   RemoveService(std::weak_ptr<TcpServiceT> service_weak)
   {
-    co_await asio::post(strand_, asio::use_awaitable);
+    co_await asio::dispatch(strand_, asio::use_awaitable);
 
     auto service = service_weak.lock();
     if (!service) {
@@ -571,7 +569,7 @@ public:
   asio::awaitable<bool>
   RemoveConnection(std::shared_ptr<TcpServiceT> service, AddrType addr)
   {
-    co_await asio::post(strand_, asio::use_awaitable);
+    co_await asio::dispatch(strand_, asio::use_awaitable);
 
     auto it = std::find(services_.begin(), services_.end(), service);
     if (it != services_.end()) {
@@ -584,7 +582,7 @@ public:
   RemoveConnection(std::shared_ptr<TcpServiceT> service, AddrType addr,
                    uint_fast16_t port)
   {
-    co_await asio::post(strand_, asio::use_awaitable);
+    co_await asio::dispatch(strand_, asio::use_awaitable);
 
     auto it = std::find(services_.begin(), services_.end(), service);
     if (it != services_.end()) {
